@@ -104,6 +104,68 @@ def banner(text: str) -> None:
     print("=" * 60)
 
 
+def _interactive() -> bool:
+    """True only when this process can safely block on a console prompt: an
+    interactive terminal is attached to stdin. False under the VICARIUS UI
+    launcher and any other non-terminal invocation (piped stdin, a cron job,
+    a subprocess with stdin redirected from /dev/null), where input() would
+    raise EOFError instead of waiting. Every input() call in this module is
+    gated on this (directly, or via --yes) so no code path launched from the
+    UI ever waits on a prompt.
+    """
+    try:
+        return sys.stdin.isatty()
+    except Exception:
+        return False
+
+
+DEFAULT_PURPOSE = "3D Phase 1 processing"
+
+
+def resolve_purpose(args, default: str = DEFAULT_PURPOSE) -> str:
+    """Resolve the run purpose (Commandment VI) without ever calling input()
+    when this process cannot safely wait on one.
+
+    --purpose (the VICARIUS UI form field) always wins. Otherwise, under
+    --yes or a non-interactive stdin, fall back to `default` instead of
+    prompting - a launch with neither a purpose nor a keyboard behind it must
+    still complete, not die with EOFError. Only prompts when a human is
+    actually at the keyboard and did not pass --yes.
+    """
+    if getattr(args, "purpose", None):
+        purpose = args.purpose.strip()
+        print(f"  Purpose (from --purpose): {purpose}")
+        return purpose or default
+
+    if getattr(args, "yes", False) or not _interactive():
+        print(f"  Purpose (default, no prompt under --yes/non-interactive stdin): {default}")
+        return default
+
+    purpose = input("  Why are you running this? ").strip()
+    return purpose or default
+
+
+def _confirm_proceed(args) -> None:
+    """Gate the SUMMARY confirmation the same way every prompt in this module
+    is gated: --yes proceeds outright; with neither --yes nor an interactive
+    stdin, abort with a clear message instead of calling input() and dying
+    with EOFError. Only prompts when a human is actually at the keyboard.
+    """
+    if args.yes:
+        print("  Proceeding (--yes).")
+        return
+    if not _interactive():
+        print(
+            "  Aborted: no --yes and stdin is not a terminal, so the SUMMARY "
+            "confirmation cannot be prompted. Pass --yes to run hands-free."
+        )
+        sys.exit(1)
+    confirm = input("  Proceed? (y/n): ").strip().lower()
+    if confirm != "y":
+        print("Aborted.")
+        sys.exit(0)
+
+
 def _naming3d():
     """Lazy import of the shared vicarius/_METADATA/3d naming rules (same
     sys.path convention already used by registry_client.py and videos.py)."""
@@ -309,8 +371,14 @@ def _set_force_rerun(project_dir: Path, on: bool) -> None:
     set_params_path(params_path, "processing.force_rerun", "true" if on else "false")
 
 
-def detect_metashape() -> str:
-    """Find the Metashape executable. Returns path or raises RuntimeError."""
+def detect_metashape(assume_yes: bool = False) -> str:
+    """Find the Metashape executable. Returns path or raises RuntimeError.
+
+    `assume_yes` is the run's --yes flag: paired with a non-interactive
+    stdin check, it keeps step 4 (prompt for the path by hand) from ever
+    running under --yes or off a terminal, where input() would raise
+    EOFError instead of waiting - a clear RuntimeError takes its place.
+    """
     # 1. Environment variable override
     env_path = os.environ.get("METASHAPE_PATH")
     if env_path and os.path.isfile(env_path) and os.access(env_path, os.X_OK):
@@ -326,7 +394,13 @@ def detect_metashape() -> str:
     if found:
         return found
 
-    # 4. Prompt user
+    # 4. Prompt user - only when a human is actually at the keyboard.
+    if assume_yes or not _interactive():
+        raise RuntimeError(
+            "Metashape Pro not found. Install it, set $METASHAPE_PATH, or add it "
+            "to $PATH. Cannot prompt for its path under --yes or a "
+            "non-interactive stdin."
+        )
     print("\nMetashape Pro executable not found automatically.")
     print("Set $METASHAPE_PATH or provide the path below.")
     user_path = input("Metashape executable path: ").strip().strip("'\"")
@@ -375,8 +449,20 @@ def ensure_project_ready(project_dir: Path) -> None:
 
 
 def open_params_for_editing(project_dir: Path) -> None:
-    """Open analysis_params.yaml in vim with instructions."""
+    """Open analysis_params.yaml in vim with instructions.
+
+    Callers already skip this entirely under --skip-vim (the flag the UI
+    always sends). This is the second line of defense: a bare-shell call
+    that forgot --skip-vim off a non-interactive stdin gets the file path
+    printed and moves on instead of dying with EOFError on the "Press
+    Enter" prompt.
+    """
     params_file = project_dir / "analysis_params.yaml"
+
+    if not _interactive():
+        print("  Stdin is not a terminal; skipping the interactive vim edit step.")
+        print(f"  Edit {params_file} directly if you need to change parameters.")
+        return
 
     banner("EDIT ANALYSIS PARAMETERS")
     print()
@@ -648,13 +734,7 @@ def run_tcrmp_mode(args, metashape_path: str) -> None:
         print(f"    {r['readable_id']}  ({r.get('original_videos', '')})")
 
     banner("PURPOSE (Commandment VI)")
-    if args.purpose:
-        purpose = args.purpose.strip()
-        print(f"  Purpose (from --purpose): {purpose}")
-    else:
-        purpose = input("  Why are you running this? ").strip()
-    if not purpose:
-        purpose = "3D Phase 1 processing (TCRMP)"
+    purpose = resolve_purpose(args)
 
     vicarius_run_dir = None
     try:
@@ -683,13 +763,7 @@ def run_tcrmp_mode(args, metashape_path: str) -> None:
         print(f"    {r['readable_id']}")
     print(f"  Purpose:     {purpose}")
     print()
-    if args.yes:
-        print("  Proceeding (--yes).")
-    else:
-        confirm = input("  Proceed? (y/n): ").strip().lower()
-        if confirm != "y":
-            print("Aborted.")
-            sys.exit(0)
+    _confirm_proceed(args)
 
     opened_params_for = set()
     processed_dirs = []
@@ -791,8 +865,21 @@ def run_tcrmp_mode(args, metashape_path: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def prompt_inputs() -> tuple:
-    """Interactive prompts for input_path and project_dir (non-TCRMP only)."""
+def prompt_inputs(assume_yes: bool = False) -> tuple:
+    """Interactive prompts for input_path and project_dir (non-TCRMP only).
+
+    Only reached when --input/--project were not both given. `assume_yes` is
+    the run's --yes flag: paired with a non-interactive stdin check, it
+    turns what would otherwise be an EOFError into a clear error explaining
+    the missing flags, so a misconfigured hands-free launch fails fast
+    instead of hanging.
+    """
+    if assume_yes or not _interactive():
+        raise RuntimeError(
+            "Non-TCRMP mode needs both --input and --project; neither can be "
+            "prompted for under --yes or a non-interactive stdin."
+        )
+
     banner("3D Phase 1 - Setup + Frame Extraction + Initial 3D Processing")
     print()
     print("This tool will guide you through:")
@@ -897,7 +984,7 @@ def run_non_tcrmp_mode(args, metashape_path: str) -> None:
         input_path = args.input.expanduser().resolve()
         project_dir = args.project.expanduser().resolve()
     else:
-        input_path, project_dir = prompt_inputs()
+        input_path, project_dir = prompt_inputs(args.yes)
 
     if not input_path.exists() or not input_path.is_dir():
         print(f"Error: Input path does not exist or is not a directory: {input_path}")
@@ -920,13 +1007,7 @@ def run_non_tcrmp_mode(args, metashape_path: str) -> None:
         print(f"    {model_id}")
 
     banner("PURPOSE (Commandment VI)")
-    if args.purpose:
-        purpose = args.purpose.strip()
-        print(f"  Purpose (from --purpose): {purpose}")
-    else:
-        purpose = input("  Why are you running this? ").strip()
-    if not purpose:
-        purpose = "3D Phase 1 processing"
+    purpose = resolve_purpose(args)
 
     vicarius_run_dir = None
     try:
@@ -955,13 +1036,7 @@ def run_non_tcrmp_mode(args, metashape_path: str) -> None:
     print(f"  Project dir: {project_dir}")
     print(f"  Purpose:     {purpose}")
     print()
-    if args.yes:
-        print("  Proceeding (--yes).")
-    else:
-        confirm = input("  Proceed? (y/n): ").strip().lower()
-        if confirm != "y":
-            print("Aborted.")
-            sys.exit(0)
+    _confirm_proceed(args)
 
     try:
         setup_project(project_dir, input_path, input_type, ids)
@@ -1130,7 +1205,7 @@ def main():
         parser.error(str(exc))
 
     print("\nDetecting Metashape installation...")
-    metashape_path = detect_metashape()
+    metashape_path = detect_metashape(args.yes)
     print(f"  Found: {metashape_path}")
 
     if args.tcrmp:

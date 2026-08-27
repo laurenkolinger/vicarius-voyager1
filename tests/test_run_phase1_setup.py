@@ -285,6 +285,147 @@ class ResetStep1Tests(unittest.TestCase):
         self.assertEqual(rows[0]["Step 1 complete"], "False")
 
 
+class PurposeAndConfirmPromptTests(unittest.TestCase):
+    """Bug found by the 3D_phase_1 end-to-end pass: run_tcrmp_mode and
+    run_non_tcrmp_mode called input() for the purpose whenever --purpose was
+    absent, even under --yes, so a hands-free launch (the VICARIUS UI always
+    runs with stdin not a terminal) died with EOFError instead of falling
+    back to a default. resolve_purpose(), _confirm_proceed(), and
+    _interactive() are the factored, testable-without-main() fix: no prompt
+    fires unless a human is actually at the keyboard and did not pass --yes.
+    """
+
+    def _args(self, purpose=None, yes=False):
+        return argparse.Namespace(purpose=purpose, yes=yes)
+
+    def _refuse_input(self, *_args, **_kwargs):
+        raise AssertionError("input() must not be called on this path")
+
+    # -- _interactive -----------------------------------------------------
+
+    def test_interactive_true_when_stdin_is_a_tty(self):
+        with mock.patch("sys.stdin.isatty", return_value=True):
+            self.assertTrue(run_phase1._interactive())
+
+    def test_interactive_false_when_stdin_is_not_a_tty(self):
+        with mock.patch("sys.stdin.isatty", return_value=False):
+            self.assertFalse(run_phase1._interactive())
+
+    def test_interactive_false_when_isatty_raises(self):
+        # e.g. stdin closed/redirected in a way that raises rather than
+        # returning False; must fail safe (never prompt), not propagate.
+        with mock.patch("sys.stdin.isatty", side_effect=ValueError("closed")):
+            self.assertFalse(run_phase1._interactive())
+
+    # -- resolve_purpose ----------------------------------------------------
+
+    def test_resolve_purpose_uses_explicit_purpose_flag_without_prompting(self):
+        args = self._args(purpose="MRS T1 backfill", yes=False)
+        with mock.patch("builtins.input", side_effect=self._refuse_input), \
+                mock.patch("sys.stdin.isatty", return_value=False):
+            self.assertEqual(run_phase1.resolve_purpose(args), "MRS T1 backfill")
+
+    def test_resolve_purpose_defaults_under_yes_with_no_purpose(self):
+        args = self._args(purpose=None, yes=True)
+        with mock.patch("builtins.input", side_effect=self._refuse_input), \
+                mock.patch("sys.stdin.isatty", return_value=True):
+            self.assertEqual(run_phase1.resolve_purpose(args), run_phase1.DEFAULT_PURPOSE)
+
+    def test_resolve_purpose_defaults_under_non_tty_without_yes(self):
+        # The exact bug: no --purpose, no --yes, stdin not a terminal. Must
+        # fall back to the default, never call input() / raise EOFError.
+        args = self._args(purpose=None, yes=False)
+        with mock.patch("builtins.input", side_effect=self._refuse_input), \
+                mock.patch("sys.stdin.isatty", return_value=False):
+            self.assertEqual(run_phase1.resolve_purpose(args), run_phase1.DEFAULT_PURPOSE)
+
+    def test_resolve_purpose_prompts_only_when_interactive_and_not_yes(self):
+        args = self._args(purpose=None, yes=False)
+        with mock.patch("builtins.input", return_value="typed purpose") as mock_input, \
+                mock.patch("sys.stdin.isatty", return_value=True):
+            self.assertEqual(run_phase1.resolve_purpose(args), "typed purpose")
+        mock_input.assert_called_once()
+
+    def test_resolve_purpose_empty_interactive_answer_falls_back_to_default(self):
+        args = self._args(purpose=None, yes=False)
+        with mock.patch("builtins.input", return_value="   "), \
+                mock.patch("sys.stdin.isatty", return_value=True):
+            self.assertEqual(run_phase1.resolve_purpose(args), run_phase1.DEFAULT_PURPOSE)
+
+    def test_resolve_purpose_honors_a_custom_default(self):
+        args = self._args(purpose=None, yes=True)
+        with mock.patch("builtins.input", side_effect=self._refuse_input):
+            self.assertEqual(
+                run_phase1.resolve_purpose(args, default="custom default"), "custom default"
+            )
+
+    # -- _confirm_proceed ---------------------------------------------------
+
+    def test_confirm_proceed_returns_immediately_under_yes(self):
+        args = self._args(yes=True)
+        with mock.patch("builtins.input", side_effect=self._refuse_input):
+            run_phase1._confirm_proceed(args)  # must not raise / exit
+
+    def test_confirm_proceed_aborts_under_non_tty_without_yes(self):
+        # The naming/summary confirmation must never block on input() when
+        # nothing can answer it; it aborts loudly instead.
+        args = self._args(yes=False)
+        with mock.patch("builtins.input", side_effect=self._refuse_input), \
+                mock.patch("sys.stdin.isatty", return_value=False):
+            with self.assertRaises(SystemExit) as ctx:
+                run_phase1._confirm_proceed(args)
+            self.assertEqual(ctx.exception.code, 1)
+
+    def test_confirm_proceed_prompts_and_honors_yes_answer(self):
+        args = self._args(yes=False)
+        with mock.patch("builtins.input", return_value="y"), \
+                mock.patch("sys.stdin.isatty", return_value=True):
+            run_phase1._confirm_proceed(args)  # must not raise / exit
+
+    def test_confirm_proceed_prompts_and_aborts_on_non_y_answer(self):
+        args = self._args(yes=False)
+        with mock.patch("builtins.input", return_value="n"), \
+                mock.patch("sys.stdin.isatty", return_value=True):
+            with self.assertRaises(SystemExit) as ctx:
+                run_phase1._confirm_proceed(args)
+            self.assertEqual(ctx.exception.code, 0)
+
+    # -- detect_metashape ----------------------------------------------------
+
+    def test_detect_metashape_raises_instead_of_prompting_under_yes(self):
+        os.environ.pop("METASHAPE_PATH", None)
+        with mock.patch.dict(os.environ, {}, clear=False), \
+                mock.patch("run_phase1.METASHAPE_SEARCH_PATHS", []), \
+                mock.patch("run_phase1.shutil.which", return_value=None), \
+                mock.patch("builtins.input", side_effect=self._refuse_input):
+            os.environ.pop("METASHAPE_PATH", None)
+            with self.assertRaises(RuntimeError):
+                run_phase1.detect_metashape(assume_yes=True)
+
+    def test_detect_metashape_raises_instead_of_prompting_under_non_tty(self):
+        with mock.patch.dict(os.environ, {}, clear=False), \
+                mock.patch("run_phase1.METASHAPE_SEARCH_PATHS", []), \
+                mock.patch("run_phase1.shutil.which", return_value=None), \
+                mock.patch("builtins.input", side_effect=self._refuse_input), \
+                mock.patch("sys.stdin.isatty", return_value=False):
+            os.environ.pop("METASHAPE_PATH", None)
+            with self.assertRaises(RuntimeError):
+                run_phase1.detect_metashape(assume_yes=False)
+
+    # -- prompt_inputs (non-TCRMP --input/--project prompt) -----------------
+
+    def test_prompt_inputs_raises_instead_of_prompting_under_yes(self):
+        with mock.patch("builtins.input", side_effect=self._refuse_input):
+            with self.assertRaises(RuntimeError):
+                run_phase1.prompt_inputs(assume_yes=True)
+
+    def test_prompt_inputs_raises_instead_of_prompting_under_non_tty(self):
+        with mock.patch("builtins.input", side_effect=self._refuse_input), \
+                mock.patch("sys.stdin.isatty", return_value=False):
+            with self.assertRaises(RuntimeError):
+                run_phase1.prompt_inputs(assume_yes=False)
+
+
 class VicariusRootDefaultTests(unittest.TestCase):
     """Task 18a: run_phase1's VICARIUS_ROOT fallback (used to reach the
     platform's _logging/src package) must resolve to a directory that
