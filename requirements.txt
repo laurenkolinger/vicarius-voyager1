@@ -1,0 +1,13 @@
+# Required Python packages for TCRMP 3D Processing Pipeline
+
+# Core dependencies
+pyyaml==6.0.1       # For YAML configuration file parsing
+pandas==2.2.0       # For data manipulation and CSV handling
+numpy==1.26.4       # For numerical operations
+opencv-python==4.9.0.80  # For video frame extraction (step0.py)
+
+# Optional dependencies
+matplotlib>=3.7.0,<4.0.0   # For visualization (compatible with Python 3.9-3.13)
+pillow>=9.5.0,<11.0.0      # For image manipulation (compatible with Python 3.9-3.13)
+
+# Install: python3.9 -m venv .venv && .venv/bin/pip install -r requirements.txt

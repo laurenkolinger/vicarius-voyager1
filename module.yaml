@@ -1,0 +1,246 @@
+# ==============================================================================
+# MODULE INTERFACE DEFINITION
+# ==============================================================================
+# 3D_phase_1 - Default 3D Processing for TCRMP Transects
+# ==============================================================================
+
+name: "3D_phase_1"
+display_name: "3D Phase 1"
+tags: ["3D"]
+version: "1.0.0"
+description: "Default first-step 3D processing for TCRMP transect video: frame extraction, alignment with capped tie-point filtering, automatic scaling, DEM, and a single delivery mesh per timepoint, driven by the TCRMP 3D registry and appending timepoints into one psx per site and transect. Non-TCRMP inputs use original names and the same processing."
+author: "Lauren K Olinger"
+created: "2026-02-13"
+
+type: "process"
+
+# ------------------------------------------------------------------------------
+# INPUTS
+# ------------------------------------------------------------------------------
+inputs:
+  - name: "video_files"
+    type: "directory"
+    formats: [".mov", ".mp4", ".mkv", ".avi"]
+    location: "<NAS path supplied at run time>"
+    required: false
+    description: "Directory containing video files for frame extraction (runs step0 + step1)"
+
+  - name: "frame_directories"
+    type: "directory"
+    formats: [".jpg", ".jpeg", ".tiff", ".tif", ".png"]
+    location: "user-specified"
+    required: false
+    description: "Directory containing subdirectories of pre-extracted frames (runs step1 only)"
+
+# ------------------------------------------------------------------------------
+# OUTPUTS
+# ------------------------------------------------------------------------------
+outputs:
+  - dataset: "3D_phase1_psx_files"          # step1 Metashape projects (draft 3D models)
+    path_template: "${project_dir}/processing/psxraw/psx_{N}_{YYYYMMDD}.psx"
+    eml: true
+
+  - dataset: "3D_phase1_extracted_frames"   # 16-bit TIFF frames per model
+    path_template: "${project_dir}/processing/frames/{MODEL_ID}/"
+    eml: true
+
+  - dataset: "3D_phase1_tracking_csv"       # per-project processing status table
+    path_template: "${project_dir}/status_{PROJECT_NAME}.csv"
+    eml: true
+
+  - dataset: "3D_phase1_step1_reports"      # Metashape step-1 PDF reports
+    path_template: "${project_dir}/processing/reportsraw/{MODEL_ID}_step1.pdf"
+    eml: true
+
+  - dataset: "3D_init_dems"                 # Digital elevation model GeoTIFF from Ultra High depth maps, native resolution, local metres when scaled.
+    path_template: "${project_dir}/output/dems/{MODEL_ID}/{MODEL_ID}_dem.tif"
+    eml: true
+
+# ------------------------------------------------------------------------------
+# PARAMETERS
+# ------------------------------------------------------------------------------
+# The Phase-1-relevant subset of the shared analysis_params.yaml. Each carries
+# `analysis_path`: the dotted key the runner writes the form value into on
+# launch. For a brand-new project the file does not exist yet, so the runner
+# seeds it from this module's analysis_params.yaml template (full multi-phase
+# set) and overlays these Phase 1 values; run_phase1 then keeps that file.
+# See ui.params_writethrough below.
+parameters:
+  - name: "frames_per_transect"
+    type: "integer"
+    default: 1000
+    analysis_path: "processing.frames_per_transect"
+    description: "Number of frames to extract per video/transect"
+
+  - name: "chunk_size"
+    type: "integer"
+    default: 1000
+    analysis_path: "processing.chunk_size"
+    description: "Maximum frames per Metashape chunk"
+
+  - name: "max_chunks_per_psx"
+    type: "integer"
+    default: 4
+    analysis_path: "processing.max_chunks_per_psx"
+    description: "Maximum chunks per PSX file for batch processing"
+
+  - name: "use_gpu"
+    type: "boolean"
+    default: true
+    analysis_path: "processing.use_gpu"
+    description: "Enable GPU acceleration for Metashape processing"
+
+  - name: "scale_in_step1"
+    type: "boolean"
+    default: true
+    analysis_path: "processing.step1_products.scale_in_step1"
+    description: >-
+      Detect the coded scale targets and apply the two 0.75 m scale bars after
+      the model builds so the DEM comes out in metres. Turn off only for models
+      filmed without targets; unscaled models get native-unit products and a
+      4-page texture.
+
+  - name: "build_dem"
+    type: "boolean"
+    default: true
+    analysis_path: "processing.step1_products.build_dem"
+    description: >-
+      Build a digital elevation model from the Ultra High depth maps after
+      scaling and export it as GeoTIFF under output/dems. The later
+      orthomosaic step and rugosity metrics both consume this DEM.
+
+  - name: "decimation_factor"
+    type: "integer"
+    default: 10
+    analysis_path: "processing.step1_products.decimation_factor"
+    description: >-
+      Reduce the mesh to full faces divided by this factor. 10 turns a
+      roughly 100 M face build into a 10 M face delivery mesh, matching the
+      validated manual KGC T2 product. Set 1 to keep the full mesh.
+
+  - name: "smooth_strength"
+    type: "integer"
+    default: 4
+    analysis_path: "processing.step1_products.smooth_strength"
+    description: >-
+      Smoothing strength applied to the decimated delivery mesh before
+      texturing. Runs after decimation, unlike 3D_phase1 which smoothed the
+      full mesh at strength 1.
+
+  - name: "texture_pixel_size"
+    type: "float"
+    default: 0.0005
+    analysis_path: "processing.step1_products.texture_pixel_size"
+    description: >-
+      Target texel size in metres for scaled models. The texture page count
+      at 8192 is computed from mesh area at this texel size; a 12 m2 transect
+      resolves to one 8192 page. Unscaled models use 4 fixed pages.
+
+# ------------------------------------------------------------------------------
+# RUNTIME REQUIREMENTS
+# ------------------------------------------------------------------------------
+runtime:
+  python_version: "3.9"
+  gpu_required: true
+  external_software:
+    - name: "Agisoft Metashape Pro"
+      version: ">=2.1.1"
+    - name: "FFmpeg"
+      version: "any"
+  tested_os:
+    - "Ubuntu 22.04"
+    - "Ubuntu 24.04"
+  dependencies: "requirements.txt"
+  estimated_time: "2-24 hours depending on number and size of models"
+
+# ------------------------------------------------------------------------------
+# CLI INTERFACE
+# ------------------------------------------------------------------------------
+# This module is interactive and handles its own I/O prompts.
+# It does NOT follow the standard <input_file> <output_directory> pattern.
+cli:
+  main_script: "src/run_phase1.py"
+  interactive: true
+  # Non-interactive flag mapping for the VICARIUS UI. When the form is
+  # submitted, the runner translates the named form fields into these CLI
+  # flags so the script never has to prompt — every input comes from the
+  # UI. The script's prompt-based fallback still works when run from a
+  # bare shell without these flags.
+  flag_map:
+    input_flag: "--input"
+    output_flag: "--project"
+    purpose_flag: "--purpose"
+    yes_flag: "--yes"
+    skip_vim_flag: "--skip-vim"
+
+# ------------------------------------------------------------------------------
+# UI FIELD LABELS
+# ------------------------------------------------------------------------------
+# Per-module overrides for the generic "Input directory" / "Output directory"
+# labels on the runner page. Because this module is interactive, the fields
+# are NOT piped into the script (the runner skips positional args for
+# interactive modules); they exist so the user knows which paths to have
+# ready when the script prompts for them in the stream console.
+ui:
+  # run_mode: terminal      -> only the "Run in terminal" launch is offered; the
+  #                            in-page SSE run button is hidden (multi-hour
+  #                            Metashape runs should not be tied to a browser tab).
+  # params_writethrough: true -> the curated `parameters:` fieldset is the single
+  #                            param surface (the full analysis_params tree is
+  #                            hidden); on launch the runner overlays those values
+  #                            into <project>/analysis_params.yaml (seeding the
+  #                            file from this module's template for a new project).
+  run_mode: "terminal"
+  params_writethrough: true
+  # Cooperative pause: step0/step1 poll a sentinel file at transect/model
+  # boundaries, so the runner page shows Pause/Resume. Pause finishes the current
+  # model, saves, and stops cleanly (frees the GPU + project lock); Resume
+  # re-launches and the idempotent steps continue. Also wired into /queue.
+  supports_pause: true
+  input_label: "Video or frame source directory"
+  input_help: |
+    Directory of source videos (.mov/.mp4/.mkv/.avi) OR a directory whose
+    subfolders each contain pre-extracted frames (.jpg/.tiff/...). The
+    runner auto-detects which flavor you gave it. This path is read-only;
+    videos are symlinked or copied into the project workspace below — the
+    source is never modified.
+  output_label: "Project workspace directory"
+  output_help: |
+    Will be created if it does not exist. This is the workspace that Phase
+    1 populates: video_source/, processing/frames/{MODEL_ID}/,
+    processing/psxraw/, processing/reportsraw/, .venv/, analysis_params.yaml,
+    status_{PROJECT_NAME}.csv. Phase 2 takes this same directory as its
+    input. Not an "output dir" in the usual sense — it is the project root.
+
+# ------------------------------------------------------------------------------
+# NAMING CONVENTIONS
+# ------------------------------------------------------------------------------
+# Input naming pattern: {PROJECTTYPE}{YYYYMMDD}_3D_{SITE}_{REPLICATE}[_n][_PROXY]
+# PROJECTTYPE: RBTEST, RBMAPPING, HYDRUSTEST, HYDRUSMAPPING, HYDRUSTCRMP, TCRMP, MISC
+# SITE: 3-letter codes (BWR, FLC, etc.) or other identifiers (DOCK)
+# REPLICATE: T1-Tn, TRY1-TRYn, RUN1-RUNn
+# _n: multipart video suffix (combined into single model)
+# _PROXY: encoding byproduct, stripped automatically
+
+# ------------------------------------------------------------------------------
+# RELATED STUDIES
+# ------------------------------------------------------------------------------
+studies:
+  - "S2_3D_structure"
+
+# ------------------------------------------------------------------------------
+# NOTES
+# ------------------------------------------------------------------------------
+notes: |
+  Phase 1 of the 3D photogrammetry pipeline. Handles:
+  - Video frame extraction (step 0) using FFmpeg with hardware acceleration
+  - Initial 3D reconstruction (step 1) using Agisoft Metashape API
+
+  After Phase 1, the user must manually straighten and crop models in
+  the Metashape GUI before running Phase 2 (automatic scaling and export).
+
+  This module wraps the first half of the 3D_vicarius pipeline
+  (github.com/laurenkolinger/3D_vicarius) into the VICARIUS module system.
+
+  Step 0 runs with system Python 3.9 + FFmpeg.
+  Step 1 runs via Metashape's bundled Python interpreter.

@@ -1,0 +1,570 @@
+Metashape version: 2.2.2
+
+OK   Chunk.addScalebar
+OK   Chunk.buildDem
+OK   Chunk.decimateModel
+OK   Chunk.depth_maps attr
+OK   Chunk.depth_maps_sets attr
+OK   Chunk.detectMarkers
+OK   Chunk.elevation attr
+OK   Chunk.exportRaster
+OK   Chunk.models attr
+OK   Chunk.smoothModel
+OK   Chunk.updateTransform
+OK   DepthMapsData
+OK   ElevationData
+OK   ImageFormatTIFF
+OK   Model.area
+OK   Model.key attr
+OK   Model.statistics
+OK   TargetType.CircularTarget20bit
+
+--- Chunk.detectMarkers ---
+detectMarkers(target_type=CircularTarget12bit, tolerance=50, filter_mask=False, inverted=False, noparity=False, maximum_residual=5, minimum_size=0, minimum_dist=5, merge_markers=False, [cameras], [frames], [progress])
+
+Create markers from coded targets.
+
+:arg target_type: Type of targets.
+:type target_type: Metashape.TargetType
+:arg tolerance: Detector tolerance (0 - 100).
+:type tolerance: int
+:arg filter_mask: Ignore masked image regions.
+:type filter_mask: bool
+:arg inverted: Detect markers on black background.
+:type inverted: bool
+:arg noparity: Disable parity checking.
+:type noparity: bool
+:arg maximum_residual: Maximum residual for non-coded targets in pixels.
+:type maximum_residual: float
+:arg minimum_size: Minimum target radius in pixels to be detected (CrossTarget type only).
+:type minimum_size: int
+:arg minimum_dist: Minimum distance between targets in pixels (CrossTarget type only).
+:type minimum_dist: int
+:arg merge_markers: Merge detected targets with existing markers.
+:type merge_markers: bool
+:arg cameras: List of cameras to process.
+:type cameras: list[int]
+:arg frames: List of frames to process.
+:type frames: list[int]
+:arg progress: Progress callback.
+:type progress: Callable[[float], None]
+
+--- Chunk.addScalebar ---
+addScalebar(point1, point2)
+
+Add new scale bar to the chunk.
+
+:arg point1: First endpoint.
+:type point1: Metashape.Marker | Metashape.Camera
+:arg point2: Second endpoint.
+:type point2: Metashape.Marker | Metashape.Camera
+:return: Created scale bar.
+:rtype: Metashape.Scalebar
+
+--- Chunk.updateTransform ---
+updateTransform()
+
+Update chunk transformation based on reference data.
+
+--- Chunk.decimateModel ---
+decimateModel(face_count=200000, [model], apply_to_selection=False, replace_asset=False, [frames], [progress])
+
+Decimate the model to the specified face count.
+
+:arg face_count: Target face count.
+:type face_count: int
+:arg model: Model to process.
+:type model: int
+:arg apply_to_selection: Apply to selection.
+:type apply_to_selection: bool
+:arg replace_asset: Replace source model with decimated model.
+:type replace_asset: bool
+:arg frames: List of frames to process.
+:type frames: list[int]
+:arg progress: Progress callback.
+:type progress: Callable[[float], None]
+
+--- Chunk.smoothModel ---
+smoothModel(strength=3, apply_to_selection=False, fix_borders=True, preserve_edges=False, [model], replace_asset=False, [frames], [progress])
+
+Smooth model using Laplacian smoothing algorithm.
+
+:arg strength: Smoothing strength.
+:type strength: float
+:arg apply_to_selection: Apply to selected faces.
+:type apply_to_selection: bool
+:arg fix_borders: Fix borders.
+:type fix_borders: bool
+:arg preserve_edges: Preserve edges.
+:type preserve_edges: bool
+:arg model: Key of model to smooth.
+:type model: int
+:arg replace_asset: Replace default asset with smoothed model.
+:type replace_asset: bool
+:arg frames: List of frames to process.
+:type frames: list[int]
+:arg progress: Progress callback.
+:type progress: Callable[[float], None]
+
+--- Chunk.buildDem ---
+buildDem(source_data=PointCloudData, interpolation=EnabledInterpolation, [projection], [region], [classes], flip_x=False, flip_y=False, flip_z=False, resolution=0, subdivide_task=True, workitem_size_tiles=10, max_workgroup_size=100, replace_asset=False, [frames], [progress])
+
+Build elevation model for the chunk.
+
+:arg source_data: Selects between point cloud and tie points.
+:type source_data: Metashape.DataSource
+:arg interpolation: Interpolation mode.
+:type interpolation: Metashape.Interpolation
+:arg projection: Output projection.
+:type projection: Metashape.OrthoProjection
+:arg region: Region to be processed.
+:type region: Metashape.BBox
+:arg classes: List of point classes to be used for surface extraction.
+:type classes: list[int]
+:arg flip_x: Flip X axis direction.
+:type flip_x: bool
+:arg flip_y: Flip Y axis direction.
+:type flip_y: bool
+:arg flip_z: Flip Z axis direction.
+:type flip_z: bool
+:arg resolution: Output resolution in meters.
+:type resolution: float
+:arg subdivide_task: Enable fine-level task subdivision.
+:type subdivide_task: bool
+:arg workitem_size_tiles: Number of tiles in a workitem.
+:type workitem_size_tiles: int
+:arg max_workgroup_size: Maximum workgroup size.
+:type max_workgroup_size: int
+:arg replace_asset: Replace default asset with generated DEM.
+:type replace_asset: bool
+:arg frames: List of frames to process.
+:type frames: list[int]
+:arg progress: Progress callback.
+:type progress: Callable[[float], None]
+
+--- Chunk.buildDepthMaps ---
+buildDepthMaps(downscale=4, filter_mode=MildFiltering, [cameras], reuse_depth=False, max_neighbors=16, subdivide_task=True, workitem_size_cameras=20, max_workgroup_size=100, [progress])
+
+Generate depth maps for the chunk.
+
+:arg downscale: Depth map quality (1 - Ultra high, 2 - High, 4 - Medium, 8 - Low, 16 - Lowest).
+:type downscale: int
+:arg filter_mode: Depth map filtering mode.
+:type filter_mode: Metashape.FilterMode
+:arg cameras: List of cameras to process.
+:type cameras: list[int]
+:arg reuse_depth: Enable reuse depth maps option.
+:type reuse_depth: bool
+:arg max_neighbors: Maximum number of neighbor images to use for depth map generation.
+:type max_neighbors: int
+:arg subdivide_task: Enable fine-level task subdivision.
+:type subdivide_task: bool
+:arg workitem_size_cameras: Number of cameras in a workitem.
+:type workitem_size_cameras: int
+:arg max_workgroup_size: Maximum workgroup size.
+:type max_workgroup_size: int
+:arg progress: Progress callback.
+:type progress: Callable[[float], None]
+
+--- Chunk.buildModel ---
+buildModel(surface_type=Arbitrary, interpolation=EnabledInterpolation, face_count=HighFaceCount, face_count_custom=200000, source_data=DepthMapsData, [classes], vertex_colors=True, vertex_confidence=True, volumetric_masks=False, keep_depth=True, replace_asset=False, split_in_blocks=False, [blocks_crs], blocks_size=250, [blocks_origin], clip_to_boundary=False, export_blocks=False, build_texture=True, output_folder='', trimming_radius=10, [cameras], [frames], subdivide_task=True, workitem_size_cameras=20, max_workgroup_size=100, [progress])
+
+Generate model for the chunk frame.
+
+:arg surface_type: Type of object to be reconstructed.
+:type surface_type: Metashape.SurfaceType
+:arg interpolation: Interpolation mode.
+:type interpolation: Metashape.Interpolation
+:arg face_count: Target face count.
+:type face_count: Metashape.FaceCount
+:arg face_count_custom: Custom face count.
+:type face_count_custom: int
+:arg source_data: Selects between point cloud, tie points, depth maps and laser scans.
+:type source_data: Metashape.DataSource
+:arg classes: List of point classes to be used for surface extraction.
+:type classes: list[int]
+:arg vertex_colors: Enable vertex colors calculation.
+:type vertex_colors: bool
+:arg vertex_confidence: Enable vertex confidence calculation.
+:type vertex_confidence: bool
+:arg volumetric_masks: Enable strict volumetric masking.
+:type volumetric_masks: bool
+:arg keep_depth: Enable store depth maps option.
+:type keep_depth: bool
+:arg replace_asset: Replace default asset with generated model.
+:type replace_asset: bool
+:arg split_in_blocks: Split model in blocks.
+:type split_in_blocks: bool
+:arg blocks_crs: Blocks grid coordinate system.
+:type blocks_crs: Metashape.CoordinateSystem
+:arg blocks_size: Blocks size in coordinate system units.
+:type blocks_size: float
+:arg blocks_origin: Blocks grid origin.
+:type blocks_origin: Metashape.Vector
+:arg clip_to_boundary: Clip to boundary shapes.
+:type clip_to_boundary: bool
+:arg export_blocks: Export completed blocks.
+:type export_blocks: bool
+:arg build_texture: Generate preview textures.
+:type build_texture: bool
+:arg output_folder: Path to output folder.
+:type output_folder: str
+:arg trimming_radius: Trimming radius (no trimming if zero).
+:type trimming_radius: int
+:arg cameras: List of cameras to process.
+:type cameras: list[int]
+:arg frames: List of frames to process.
+:type frames: list[int]
+:arg subdivide_task: Enable fine-level task subdivision.
+:type subdivide_task: bool
+:arg workitem_size_cameras: Number of cameras in a workitem.
+:type workitem_size_cameras: int
+:arg max_workgroup_size: Maximum workgroup size.
+:type max_workgroup_size: int
+:arg progress: Progress callback.
+:type progress: Callable[[float], None]
+
+--- Chunk.buildUV ---
+buildUV(mapping_mode=GenericMapping, page_count=1, texture_size=8192, pixel_size=0, [camera], [progress])
+
+Generate uv mapping for the model.
+
+:arg mapping_mode: Texture mapping mode.
+:type mapping_mode: Metashape.MappingMode
+:arg page_count: Number of texture pages to generate.
+:type page_count: int
+:arg texture_size: Expected size of texture page at texture generation step.
+:type texture_size: int
+:arg pixel_size: Texture resolution in meters.
+:type pixel_size: float
+:arg camera: Camera to be used for texturing in CameraMapping mode.
+:type camera: int
+:arg progress: Progress callback.
+:type progress: Callable[[float], None]
+
+--- Chunk.buildTexture ---
+buildTexture(blending_mode=MosaicBlending, texture_size=8192, fill_holes=True, ghosting_filter=True, [cameras], texture_type=DiffuseMap, source_data=ImagesData, [source_asset], transfer_texture=True, workitem_size_cameras=20, max_workgroup_size=100, anti_aliasing=1, [progress])
+
+Generate texture for the chunk.
+
+:arg blending_mode: Texture blending mode.
+:type blending_mode: Metashape.BlendingMode
+:arg texture_size: Texture page size.
+:type texture_size: int
+:arg fill_holes: Enable hole filling.
+:type fill_holes: bool
+:arg ghosting_filter: Enable ghosting filter.
+:type ghosting_filter: bool
+:arg cameras: A list of cameras to be used for texturing.
+:type cameras: list[int]
+:arg texture_type: Texture type.
+:type texture_type: Metashape.Model.TextureType
+:arg source_data: Source data to create texture from.
+:type source_data: Metashape.DataSource
+:arg source_asset: Source asset.
+:type source_asset: int
+:arg transfer_texture: Transfer texture.
+:type transfer_texture: bool
+:arg workitem_size_cameras: Number of cameras in a workitem (block model only).
+:type workitem_size_cameras: int
+:arg max_workgroup_size: Maximum workgroup size (block model only).
+:type max_workgroup_size: int
+:arg anti_aliasing: Anti-aliasing coefficient for baking
+:type anti_aliasing: int
+:arg progress: Progress callback.
+:type progress: Callable[[float], None]
+
+--- Chunk.exportRaster ---
+exportRaster(path='', format=RasterFormatTiles, image_format=ImageFormatNone, raster_transform=RasterTransformNone, [projection], [region], resolution=0, resolution_x=0, resolution_y=0, block_width=10000, block_height=10000, split_in_blocks=False, width=0, height=0, [world_transform], nodata_value=-32767, save_kml=False, save_world=False, save_scheme=False, save_alpha=True, image_description='', [image_compression], network_links=True, global_profile=False, min_zoom_level=-1, max_zoom_level=-1, white_background=True, clip_to_boundary=True, title='Orthomosaic', description='Generated by Agisoft Metashape', source_data=OrthomosaicData, [asset], north_up=True, tile_width=256, tile_height=256, [progress])
+
+Export DEM or orthomosaic to file.
+
+:arg path: Path to output orthomosaic.
+:type path: str
+:arg format: Export format.
+:type format: Metashape.RasterFormat
+:arg image_format: Tile format.
+:type image_format: Metashape.ImageFormat
+:arg raster_transform: Raster band transformation.
+:type raster_transform: Metashape.RasterTransformType
+:arg projection: Output projection.
+:type projection: Metashape.OrthoProjection
+:arg region: Region to be exported.
+:type region: Metashape.BBox
+:arg resolution: Output resolution in meters.
+:type resolution: float
+:arg resolution_x: Pixel size in the X dimension in projected units.
+:type resolution_x: float
+:arg resolution_y: Pixel size in the Y dimension in projected units.
+:type resolution_y: float
+:arg block_width: Raster block width in pixels.
+:type block_width: int
+:arg block_height: Raster block height in pixels.
+:type block_height: int
+:arg split_in_blocks: Split raster in blocks.
+:type split_in_blocks: bool
+:arg width: Raster width.
+:type width: int
+:arg height: Raster height.
+:type height: int
+:arg world_transform: 2x3 raster-to-world transformation matrix.
+:type world_transform: Metashape.Matrix
+:arg nodata_value: No-data value (DEM export only).
+:type nodata_value: float
+:arg save_kml: Enable kml file generation.
+:type save_kml: bool
+:arg save_world: Enable world file generation.
+:type save_world: bool
+:arg save_scheme: Enable tile scheme files generation.
+:type save_scheme: bool
+:arg save_alpha: Enable alpha channel generation.
+:type save_alpha: bool
+:arg image_description: Optional description to be added to image files.
+:type image_description: str
+:arg image_compression: Image compression parameters.
+:type image_compression: Metashape.ImageCompression
+:arg network_links: Enable network links generation for KMZ format.
+:type network_links: bool
+:arg global_profile: Use global profile (GeoPackage and TMS formats only).
+:type global_profile: bool
+:arg min_zoom_level: Minimum zoom level (GeoPackage, Google Map Tiles, MBTiles and World Wind Tiles formats only).
+:type min_zoom_level: int
+:arg max_zoom_level: Maximum zoom level (GeoPackage, Google Map Tiles, MBTiles and World Wind Tiles formats only).
+:type max_zoom_level: int
+:arg white_background: Enable white background.
+:type white_background: bool
+:arg clip_to_boundary: Clip raster to boundary shapes.
+:type clip_to_boundary: bool
+:arg title: Export title.
+:type title: str
+:arg description: Export description.
+:type description: str
+:arg source_data: Selects between DEM and orthomosaic.
+:type source_data: Metashape.DataSource
+:arg asset: Asset key to export.
+:type asset: int
+:arg north_up: Use north-up orientation for export.
+:type north_up: bool
+:arg tile_width: Tile width in pixels.
+:type tile_width: int
+:arg tile_height: Tile height in pixels.
+:type tile_height: int
+:arg progress: Progress callback.
+:type progress: Callable[[float], None]
+
+--- Chunk.exportReport ---
+exportReport(path='', title='', description='', font_size=12, page_numbers=True, include_system_info=True, [user_settings], logo_path='', [progress])
+
+Export processing report in PDF format.
+
+:arg path: Path to output report.
+:type path: str
+:arg title: Report title.
+:type title: str
+:arg description: Report description.
+:type description: str
+:arg font_size: Font size (pt).
+:type font_size: int
+:arg page_numbers: Enable page numbers.
+:type page_numbers: bool
+:arg include_system_info: Include system information.
+:type include_system_info: bool
+:arg user_settings: A list of user defined settings to include on the Processing Parameters page.
+:type user_settings: list[tuple[str, str]]
+:arg logo_path: Path to company logo file.
+:type logo_path: str
+:arg progress: Progress callback.
+:type progress: Callable[[float], None]
+
+=====================================================================
+DECISION RULES (recorded by implementer, Task 1, 2026-08-17)
+=====================================================================
+
+Run environment: metashape -r tools/probe_metashape_api.py executed headless
+with no QT_QPA_PLATFORM override needed. No licensing prompt, no display
+error. Output opened with:
+Agisoft Metashape Professional Version: 2.2.2 build 21287 (64 bit)
+Platform: Linux
+All 18 fixed checks above returned OK, zero MISS. The 12 docstrings above
+are the full, current signatures for the installed 2.2.2 API and are the
+authority for every kwarg decision below.
+
+Beyond the fixed checklist in the committed probe script, the following
+attributes were needed to resolve the consumer calls listed in the Task 1
+context and were confirmed against the SAME installed build via direct
+introspection (hasattr/dir/help on the running Metashape module, plus one
+scratch Metashape.Document()/addChunk() to inspect empty-state container
+types). This introspection was run interactively, not saved as a second
+committed script, since the brief specifies the probe script verbatim; the
+findings are recorded here for traceability:
+- Metashape.Scalebar.Reference class exists; its attributes are exactly
+  distance, accuracy, enabled.
+- Metashape.Model.Statistics class exists; its attributes include faces,
+  vertices, components, degenerate_faces, duplicate_faces, flipped_normals,
+  free_vertices, invalid_vertices, multiple_edges, open_edges,
+  out_of_range_indices, similar_vertices, zero_faces.
+- Chunk.remove(items) docstring: accepts a list whose member types include
+  Metashape.DepthMaps and Metashape.Model (and Elevation, Orthomosaic,
+  Marker, Scalebar, etc.), confirming stale-asset pruning via chunk.remove
+  works for both depth maps and models.
+- On a freshly created empty chunk (doc.addChunk()): chunk.depth_maps is
+  None (singular, "active" depth-map asset, populated after buildDepthMaps);
+  chunk.depth_maps_sets is [] (a list, holds multiple depth-map asset sets);
+  chunk.models is [] (list of Model assets); chunk.model is None (singular
+  active model asset); chunk.elevation is None (singular active DEM asset);
+  chunk.elevations is [] (list of DEM assets, mirrors the models pattern;
+  not in the original context list but relevant to any future DEM pruning).
+- hasattr(Metashape, "EnabledInterpolation") is True (top-level shortcut);
+  Metashape.Interpolation.EnabledInterpolation is also True (nested form).
+  Both resolve to the same enum member; Task context's
+  Metashape.EnabledInterpolation usage is valid.
+- TargetType members (dir(Metashape.TargetType)) include CircularTarget,
+  CircularTarget12bit, CircularTarget14bit, CircularTarget16bit,
+  CircularTarget20bit, CrossTarget, plus AprilTag variants. CircularTarget20bit
+  confirmed present.
+
+Web cross-check (secondary, per Step 3 -- used only because the exportRaster
+docstring does not explain what the default format=RasterFormatTiles enum
+value means for a single output path; the installed help() confirms the
+kwarg exists and is optional, but not its export-shape semantics):
+- github.com/agisoft-llc/metashape-scripts, src/samples/general_workflow.py
+  (Agisoft's own official sample repo) calls
+  chunk.exportRaster(output_folder + '/dem.tif', source_data=Metashape.ElevationData)
+  and chunk.exportRaster(output_folder + '/orthomosaic.tif', source_data=Metashape.OrthomosaicData)
+  with no explicit format= argument, producing a single georeferenced TIFF
+  file per call. This confirms the default format=RasterFormatTiles is the
+  correct default for single-file GeoTIFF DEM/ortho export despite the
+  "Tiles" name (it is not a GIS tile-scheme output unless split_in_blocks
+  is set). URL: https://github.com/agisoft-llc/metashape-scripts/blob/master/src/samples/general_workflow.py
+
+---------------------------------------------------------------------
+Decision table: consumer call -> installed-API status -> notes
+---------------------------------------------------------------------
+
+1. detectMarkers(target_type=Metashape.TargetType.CircularTarget20bit,
+   tolerance=50, filter_mask=False)
+   STATUS: supported as written.
+   Docstring: detectMarkers(target_type=CircularTarget12bit, tolerance=50,
+   filter_mask=False, inverted=False, noparity=False, maximum_residual=5,
+   minimum_size=0, minimum_dist=5, merge_markers=False, [cameras], [frames],
+   [progress]). All three kwargs are named parameters in the installed
+   signature; CircularTarget20bit is a confirmed TargetType member.
+
+2. addScalebar(m1, m2) then set .reference.distance / .accuracy / .enabled
+   STATUS: supported as written.
+   Docstring: addScalebar(point1, point2) -> Metashape.Scalebar, positional
+   args, types Metashape.Marker | Metashape.Camera. Scalebar.reference
+   returns a Metashape.Scalebar.Reference instance whose only attributes
+   are distance, accuracy, enabled (confirmed by dir()), matching exactly.
+
+3. updateTransform()
+   STATUS: supported as written.
+   Docstring: updateTransform(), no arguments beyond self.
+
+4. buildDem(source_data=Metashape.DepthMapsData,
+   interpolation=Metashape.EnabledInterpolation[, resolution=r])
+   STATUS: supported as written.
+   Docstring: buildDem(source_data=PointCloudData, interpolation=
+   EnabledInterpolation, [projection], [region], [classes], flip_x=False,
+   flip_y=False, flip_z=False, resolution=0, subdivide_task=True,
+   workitem_size_tiles=10, max_workgroup_size=100, replace_asset=False,
+   [frames], [progress]). source_data, interpolation and resolution are all
+   named kwargs; DepthMapsData and EnabledInterpolation both confirmed to
+   exist in the Metashape namespace. Bonus: buildDem also exposes
+   replace_asset=False if a future task wants in-place DEM replacement
+   instead of manual chunk.elevations pruning.
+
+5. exportRaster(path=..., source_data=Metashape.ElevationData,
+   image_format=Metashape.ImageFormatTIFF, save_world=True)
+   STATUS: supported as written.
+   Docstring: exportRaster(path='', format=RasterFormatTiles,
+   image_format=ImageFormatNone, raster_transform=RasterTransformNone,
+   [projection], [region], resolution=0, resolution_x=0, resolution_y=0,
+   block_width=10000, block_height=10000, split_in_blocks=False, width=0,
+   height=0, [world_transform], nodata_value=-32767, save_kml=False,
+   save_world=False, save_scheme=False, save_alpha=True,
+   image_description='', [image_compression], network_links=True,
+   global_profile=False, min_zoom_level=-1, max_zoom_level=-1,
+   white_background=True, clip_to_boundary=True, title='Orthomosaic',
+   description='Generated by Agisoft Metashape', source_data=
+   OrthomosaicData, [asset], north_up=True, tile_width=256,
+   tile_height=256, [progress]). path, source_data, image_format,
+   save_world are all named kwargs; ElevationData and ImageFormatTIFF
+   both confirmed present. format is left at its default (RasterFormatTiles)
+   by the consumer call, confirmed correct for single-file GeoTIFF export
+   by the web cross-check above (Agisoft's own sample script uses the same
+   pattern with no explicit format=).
+
+6. chunk.remove(<depth map assets>) via chunk.depth_maps_sets or
+   chunk.depth_maps
+   STATUS: supported as written.
+   chunk.depth_maps (singular, active asset, None when unbuilt) and
+   chunk.depth_maps_sets (list of DepthMaps assets, [] when unbuilt) both
+   confirmed present as Chunk attributes. Chunk.remove(items) docstring
+   confirms Metashape.DepthMaps is an accepted list-item type. Fallback
+   pattern for pruning stale depth-map assets: iterate
+   chunk.depth_maps_sets, keep the wanted DepthMaps by .key, pass the rest
+   to chunk.remove([...]).
+
+7. decimateModel(face_count=n, apply_to_selection=False, replace_asset=True)
+   STATUS: supported as written.
+   Docstring: decimateModel(face_count=200000, [model],
+   apply_to_selection=False, replace_asset=False, [frames], [progress]).
+   All three named kwargs present; replace_asset default is False, task
+   must pass True explicitly (as written in the consumer call).
+
+8. smoothModel(strength=s, apply_to_selection=False, fix_borders=b,
+   preserve_edges=p, replace_asset=True)
+   STATUS: supported as written.
+   Docstring: smoothModel(strength=3, apply_to_selection=False,
+   fix_borders=True, preserve_edges=False, [model], replace_asset=False,
+   [frames], [progress]). All five named kwargs present; replace_asset
+   default is False, task must pass True explicitly (as written).
+
+9. chunk.models / chunk.model.key for a stale-asset prune
+   STATUS: supported as written.
+   chunk.models (list of Model assets) and chunk.model (singular active
+   Model, None when unbuilt) both confirmed present; Model.key confirmed
+   present as a Model attribute. Pattern: iterate chunk.models, compare
+   .key against chunk.model.key, chunk.remove() the rest (Model is an
+   accepted Chunk.remove item type).
+
+10. chunk.model.statistics().faces
+    STATUS: supported as written.
+    Docstring: Model.statistics([progress]) -> Metashape.Model.Statistics.
+    Statistics class attributes confirmed to include faces (and vertices,
+    components, and several mesh-quality counters not needed here).
+
+11. chunk.model.area()
+    STATUS: supported as written.
+    Docstring: Model.area() -> float, no arguments beyond self.
+
+12. buildUV(mapping_mode=..., texture_size=8192, page_count=n)
+    STATUS: supported as written.
+    Docstring: buildUV(mapping_mode=GenericMapping, page_count=1,
+    texture_size=8192, pixel_size=0, [camera], [progress]). All three
+    named kwargs present.
+
+13. buildTexture(texture_size=8192, ...)
+    STATUS: supported as written.
+    Docstring: buildTexture(blending_mode=MosaicBlending, texture_size=
+    8192, fill_holes=True, ghosting_filter=True, [cameras], texture_type=
+    DiffuseMap, source_data=ImagesData, [source_asset],
+    transfer_texture=True, workitem_size_cameras=20,
+    max_workgroup_size=100, anti_aliasing=1, [progress]). texture_size and
+    every other standard kwarg (blending_mode, fill_holes, ghosting_filter,
+    source_data) are present and named.
+
+---------------------------------------------------------------------
+Summary
+---------------------------------------------------------------------
+All 13 consumer call surfaces named in the Task 1 context are supported
+as written against the installed Metashape 2.2.2 Python API. No unsupported
+surfaces and no fallback adaptations were required. The only nuance worth
+carrying into Tasks 6 to 9: decimateModel and smoothModel both default
+replace_asset to False, so callers must pass replace_asset=True explicitly
+to update the asset in place, exactly as the consumer calls already do;
+depth-map and model asset pruning is not automatic on rebuild and must be
+done by hand via chunk.remove() against chunk.depth_maps_sets / chunk.models,
+also exactly as the consumer calls already assume.
+
