@@ -1,0 +1,176 @@
+"""Tests for src/run_phase1.py's TCRMP setup (Task 9): select_rows() and
+prepare_tcrmp_folder() must be usable without Metashape and without any
+prompt. Uses a temp registry root (VICARIUS_3D_REGISTRY_ROOT) and tiny
+lavfi videos so the whole flow runs without real survey data.
+"""
+import argparse
+import csv
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+SRC = os.path.join(os.path.dirname(HERE), "src")
+sys.path.insert(0, SRC)
+
+import registry_client  # noqa: E402
+import run_phase1  # noqa: E402
+
+LIB_DIR = os.environ.get("VICARIUS_ROOT", "/mnt/rip/vicarius_drive/vicarius") + "/_METADATA/3d"
+sys.path.insert(0, LIB_DIR)
+import naming3d  # noqa: E402
+
+
+def _tiny_video(path, vcodec="libx264"):
+    cmd = ["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi",
+           "-i", "testsrc=size=64x64:rate=2", "-frames:v", "2", "-c:v", vcodec]
+    if vcodec == "libx264":
+        cmd += ["-pix_fmt", "yuv420p"]
+    cmd.append(path)
+    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def _args(**kw):
+    base = {"ids": None, "site": None, "transect": None, "force": False}
+    base.update(kw)
+    return argparse.Namespace(**base)
+
+
+@unittest.skipUnless(shutil.which("ffmpeg"), "ffmpeg not on PATH")
+class RunPhase1SetupTests(unittest.TestCase):
+    def setUp(self):
+        self.registry_root = tempfile.mkdtemp()
+        os.environ["VICARIUS_3D_REGISTRY_ROOT"] = self.registry_root
+        import importlib
+        importlib.reload(registry_client)
+        registry_client.configure({"processing": {"tcrmp": True}})
+        self.assertTrue(registry_client.enabled(), "registry_client did not enable with tcrmp=True")
+
+        # Two video source directories (deliberately different, so folder
+        # reuse can be tested against the row's OWN video_location).
+        self.video_dir_a = tempfile.mkdtemp()  # holds the earlier (2023ann) video
+        self.video_dir_b = tempfile.mkdtemp()  # holds the later (2024_pbl) video
+        self.video_a = os.path.join(self.video_dir_a, "TCRMP20231015_3D_MRS_T1.MOV")
+        self.video_b = os.path.join(self.video_dir_b, "TCRMP20240412_3D_MRS_T1.MP4")
+        _tiny_video(self.video_a)
+        _tiny_video(self.video_b)
+
+        registry_client.update(
+            "MRS_T1_2023ann", site="MRS", transect="T1", year="2023", season_token="ann",
+            process="true", video_location=self.video_dir_a,
+            original_videos="TCRMP20231015_3D_MRS_T1.MOV",
+        )
+        registry_client.update(
+            "MRS_T1_2024_pbl", site="MRS", transect="T1", year="2024", season_token="_pbl",
+            process="true", video_location=self.video_dir_b,
+            original_videos="TCRMP20240412_3D_MRS_T1.MP4",
+        )
+
+    def tearDown(self):
+        shutil.rmtree(self.registry_root, ignore_errors=True)
+        shutil.rmtree(self.video_dir_a, ignore_errors=True)
+        shutil.rmtree(self.video_dir_b, ignore_errors=True)
+        os.environ.pop("VICARIUS_3D_REGISTRY_ROOT", None)
+
+    # -- select_rows ----------------------------------------------------
+
+    def test_select_rows_default_returns_both_chronological(self):
+        rows = run_phase1.select_rows(_args())
+        self.assertEqual([r["readable_id"] for r in rows], ["MRS_T1_2023ann", "MRS_T1_2024_pbl"])
+
+    def test_select_rows_honors_site_and_transect(self):
+        rows = run_phase1.select_rows(_args(site="MRS", transect="T1"))
+        self.assertEqual([r["readable_id"] for r in rows], ["MRS_T1_2023ann", "MRS_T1_2024_pbl"])
+        rows = run_phase1.select_rows(_args(site="BID"))
+        self.assertEqual(rows, [])
+
+    def test_select_rows_honors_ids_and_returns_chronological_order(self):
+        # Requested in reverse order; select_rows must still return
+        # chronological order (the order the shared psx needs), not the
+        # order the ids were listed in.
+        rows = run_phase1.select_rows(_args(ids="MRS_T1_2024_pbl,MRS_T1_2023ann"))
+        self.assertEqual([r["readable_id"] for r in rows], ["MRS_T1_2023ann", "MRS_T1_2024_pbl"])
+
+    def test_select_rows_skips_process_false(self):
+        registry_client.update(
+            "MRS_T2_2022ann", site="MRS", transect="T2", year="2022", season_token="ann",
+            process="false", video_location=self.video_dir_a,
+        )
+        rows = run_phase1.select_rows(_args())
+        self.assertNotIn("MRS_T2_2022ann", [r["readable_id"] for r in rows])
+
+    def test_select_rows_skips_missing_video_location(self):
+        registry_client.update(
+            "MRS_T3_2022ann", site="MRS", transect="T3", year="2022", season_token="ann",
+            process="true", video_location="/nonexistent/path/for/this/test",
+        )
+        rows = run_phase1.select_rows(_args())
+        self.assertNotIn("MRS_T3_2022ann", [r["readable_id"] for r in rows])
+
+    def test_select_rows_skips_complete_unless_force(self):
+        registry_client.update("MRS_T1_2023ann", step1_status="complete")
+        rows = run_phase1.select_rows(_args())
+        self.assertEqual([r["readable_id"] for r in rows], ["MRS_T1_2024_pbl"])
+
+        rows = run_phase1.select_rows(_args(force=True))
+        self.assertEqual([r["readable_id"] for r in rows], ["MRS_T1_2023ann", "MRS_T1_2024_pbl"])
+
+    # -- prepare_tcrmp_folder --------------------------------------------
+
+    def test_prepare_tcrmp_folder_creates_named_folder_next_to_video(self):
+        row = registry_client.row("MRS_T1_2023ann")
+        project_dir = run_phase1.prepare_tcrmp_folder(row)
+
+        expected_name = naming3d.processing_folder_name("MRS", "T1", "20231015")
+        self.assertEqual(expected_name, "MRS_T1_2023ann_3dprocessing")
+        self.assertEqual(project_dir, __import__("pathlib").Path(self.video_dir_a) / expected_name)
+        self.assertTrue(project_dir.is_dir())
+        for sub in ("console", "frames", "reports"):
+            self.assertTrue((project_dir / sub).is_dir(), sub)
+
+        params_file = project_dir / "analysis_params.yaml"
+        self.assertTrue(params_file.is_file())
+        import yaml
+        params = yaml.safe_load(params_file.read_text())
+        self.assertIs(params["processing"]["tcrmp"], True)
+
+        updated = registry_client.row("MRS_T1_2023ann")
+        self.assertEqual(updated["processing_folder"], expected_name)
+        self.assertEqual(updated["processing_location"], str(project_dir))
+        self.assertEqual(updated["console_log"], str(project_dir / "console"))
+        self.assertEqual(updated["step"], "1")
+        self.assertEqual(updated["stage"], "starting")
+
+        status_csv = project_dir / "status.csv"
+        self.assertTrue(status_csv.is_file())
+        with open(status_csv, newline="") as fh:
+            rows = list(csv.DictReader(fh))
+        self.assertEqual(rows[0]["original_videos"], "TCRMP20231015_3D_MRS_T1.MOV")
+        self.assertEqual(rows[0]["readable_id"], "MRS_T1_2023ann")
+        self.assertEqual(rows[0]["Model ID"], "MRS_T1_2023ann")
+
+    def test_prepare_tcrmp_folder_names_for_earliest_timepoint_even_when_later_runs_first(self):
+        # Process the LATER timepoint first. The folder must still be named
+        # for the earliest known timepoint of the site/transect (2023ann),
+        # and it goes next to the row actually being processed (video_dir_b).
+        later_row = registry_client.row("MRS_T1_2024_pbl")
+        project_dir_first = run_phase1.prepare_tcrmp_folder(later_row)
+        self.assertEqual(project_dir_first.name, "MRS_T1_2023ann_3dprocessing")
+        self.assertEqual(project_dir_first.parent, __import__("pathlib").Path(self.video_dir_b))
+
+        # Now process the earlier timepoint. It must REUSE the folder just
+        # created next to the OTHER row's video, not create a new one next
+        # to its own video_location (video_dir_a).
+        earlier_row = registry_client.row("MRS_T1_2023ann")
+        project_dir_second = run_phase1.prepare_tcrmp_folder(earlier_row)
+        self.assertEqual(project_dir_second, project_dir_first)
+
+        for readable_id in ("MRS_T1_2024_pbl", "MRS_T1_2023ann"):
+            self.assertEqual(registry_client.row(readable_id)["processing_location"], str(project_dir_first))
+
+
+if __name__ == "__main__":
+    unittest.main()

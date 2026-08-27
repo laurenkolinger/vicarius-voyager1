@@ -66,6 +66,44 @@ outputs:
 # set) and overlays these Phase 1 values; run_phase1 then keeps that file.
 # See ui.params_writethrough below.
 parameters:
+  - name: "tcrmp"
+    type: "boolean"
+    default: true
+    analysis_path: "processing.tcrmp"
+    description: >-
+      Registry-driven mode (default): select timepoints from the shared TCRMP
+      3D registry and process each next to its own video, appending into one
+      psx per site and transect. Turn off to process a plain input/project
+      pair by original file name instead (no registry, no NAS video lookup).
+
+  - name: "ids"
+    type: "string"
+    default: ""
+    description: >-
+      TCRMP mode only. Comma-separated readable ids to process, e.g.
+      MRS_T1_2023ann,MRS_T1_2024_pbl. Leave blank to select by site/transect
+      below, or, if those are also blank, every pending timepoint in the
+      registry. Not yet writethrough-wired (see cli.flag_map below); pass
+      --ids on a terminal launch for a scoped run.
+
+  - name: "site"
+    type: "string"
+    default: ""
+    description: >-
+      TCRMP mode only. Registry site code to select, e.g. MRS. Leave blank
+      together with transect to select every pending timepoint. Not yet
+      writethrough-wired (see cli.flag_map below); pass --site on a
+      terminal launch for a scoped run.
+
+  - name: "transect"
+    type: "string"
+    default: ""
+    description: >-
+      TCRMP mode only. Registry transect code to select, e.g. T1. Leave
+      blank together with site to select every pending timepoint. Not yet
+      writethrough-wired (see cli.flag_map below); pass --transect on a
+      terminal launch for a scoped run.
+
   - name: "frames_per_transect"
     type: "integer"
     default: 1000
@@ -163,7 +201,7 @@ cli:
   interactive: true
   # Non-interactive flag mapping for the VICARIUS UI. When the form is
   # submitted, the runner translates the named form fields into these CLI
-  # flags so the script never has to prompt — every input comes from the
+  # flags so the script never has to prompt: every input comes from the
   # UI. The script's prompt-based fallback still works when run from a
   # bare shell without these flags.
   flag_map:
@@ -172,6 +210,21 @@ cli:
     purpose_flag: "--purpose"
     yes_flag: "--yes"
     skip_vim_flag: "--skip-vim"
+    # TCRMP mode is the module default and needs no toggle from the runner: a
+    # launch with input_dir/output_dir left blank already processes every
+    # pending registry timepoint hands-free through purpose_flag/yes_flag/
+    # skip_vim_flag alone (run_phase1.py's own --tcrmp default does the
+    # rest). tcrmp_flag/ids_flag/site_flag/transect_flag/force_flag document
+    # the full CLI contract for a scoped or forced TCRMP run (one site and
+    # transect, specific ids, or reprocessing a completed timepoint).
+    # vicarius_ui_os/runner.py's generic argv builder only forwards the five
+    # keys above today, so until it is extended, a scoped/forced run is
+    # typed directly into the terminal launch's command line.
+    tcrmp_flag: "--tcrmp"
+    ids_flag: "--ids"
+    site_flag: "--site"
+    transect_flag: "--transect"
+    force_flag: "--force"
 
 # ------------------------------------------------------------------------------
 # UI FIELD LABELS
@@ -197,20 +250,24 @@ ui:
   # model, saves, and stops cleanly (frees the GPU + project lock); Resume
   # re-launches and the idempotent steps continue. Also wired into /queue.
   supports_pause: true
-  input_label: "Video or frame source directory"
+  input_label: "Video or frame source directory (non-TCRMP mode only)"
   input_help: |
-    Directory of source videos (.mov/.mp4/.mkv/.avi) OR a directory whose
-    subfolders each contain pre-extracted frames (.jpg/.tiff/...). The
-    runner auto-detects which flavor you gave it. This path is read-only;
-    videos are symlinked or copied into the project workspace below — the
-    source is never modified.
-  output_label: "Project workspace directory"
+    Non-TCRMP mode only (see the tcrmp parameter above); TCRMP mode ignores
+    this field and reads video_location straight from the registry. A
+    directory of source videos (any container ffprobe reads) OR a directory
+    whose subfolders each contain pre-extracted frames (.jpg/.tiff/...).
+    The runner auto-detects which flavor you gave it. This path is
+    read-only: video is read from it in place (never copied), and frame
+    subfolders are symlinked into the project, not copied.
+  output_label: "Project workspace directory (non-TCRMP mode only)"
   output_help: |
-    Will be created if it does not exist. This is the workspace that Phase
-    1 populates: video_source/, processing/frames/{MODEL_ID}/,
-    processing/psxraw/, processing/reportsraw/, .venv/, analysis_params.yaml,
-    status_{PROJECT_NAME}.csv. Phase 2 takes this same directory as its
-    input. Not an "output dir" in the usual sense — it is the project root.
+    Non-TCRMP mode only (see the tcrmp parameter above); TCRMP mode leaves
+    this blank and derives one project directory per timepoint next to its
+    own video. Will be created if it does not exist. This is the workspace
+    that Phase 1 populates: frames/{MODEL_ID}/, reports/, console/, .venv/,
+    analysis_params.yaml, status.csv, and the psx bundle at the top level.
+    Phase 2 takes this same directory as its input. Not an "output dir" in
+    the usual sense: it is the project root.
 
 # ------------------------------------------------------------------------------
 # NAMING CONVENTIONS

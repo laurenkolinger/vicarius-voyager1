@@ -2,30 +2,40 @@
 """
 run_phase1.py - Interactive CLI runner for 3D Phase 1 processing.
 
-Handles setup, input detection, naming validation, environment setup,
-frame extraction (step0), and initial 3D processing (step1).
+Two modes:
+
+  TCRMP (default, --tcrmp): rows come from the shared TCRMP 3D registry
+  (vicarius/_METADATA/3d), selected by --ids / --site+--transect / or, with
+  none of those given, every pending timepoint. Each timepoint's processing
+  folder lives NEXT TO its own video (never copied, never symlinked); all
+  timepoints of the same site+transect share one folder and one growing
+  psx, so the folder is only created once (next to whichever video is
+  processed first) and every later timepoint reuses it.
+
+  Plain (--no-tcrmp): the original --input/--project pair, minus copying.
+  Video input is read in place from --input; frame-folder input is
+  symlinked (read-only) into the project's frames/ directory. Non-TCRMP ids
+  are the original file name without extension - no multi-part merging, no
+  naming-pattern validation.
 
 Usage:
-    python src/run_phase1.py
-    python src/run_phase1.py --input /path/to/input --project /path/to/project
+    python src/run_phase1.py                          # TCRMP, every pending timepoint
+    python src/run_phase1.py --site MRS --transect T1  # TCRMP, one site/transect
+    python src/run_phase1.py --no-tcrmp --input /path/to/input --project /path/to/project
 """
 
 import argparse
-import concurrent.futures
 import os
+import re
 import shutil
 import subprocess
 import sys
 import time
 from pathlib import Path
 
-from naming import (
-    parse_model_name,
-    group_multipart,
-    strip_proxy,
-    check_unknown_values,
-    KNOWN_PROJECT_TYPES,
-)
+import registry_client
+import status_rows
+import videos as videos_mod
 
 # ---------------------------------------------------------------------------
 # VICARIUS logging integration
@@ -45,7 +55,7 @@ except ImportError:
 SRC_DIR = Path(__file__).resolve().parent  # github_repo/src/
 GITHUB_REPO_DIR = SRC_DIR.parent  # github_repo/
 MODULE_DIR = GITHUB_REPO_DIR.parent  # modules/<module_name>/
-MODULE_NAME = os.path.basename(MODULE_DIR)  # e.g. "3D_init"; used for provenance/logging
+MODULE_NAME = os.path.basename(MODULE_DIR)  # e.g. "3D_phase_1"; used for provenance/logging
 TEMPLATE_PARAMS = GITHUB_REPO_DIR / "analysis_params.yaml"
 
 # Metashape detection paths (ordered)
@@ -56,7 +66,8 @@ METASHAPE_SEARCH_PATHS = [
 # Cooperative-pause contract. A step (step0/step1) that sees the pause sentinel
 # exits with this code; we translate that into a PipelinePaused so main() can
 # stop the pipeline gracefully and propagate PAUSE_EXIT_CODE to the VICARIUS
-# runner (which records the run as "paused", not "failed"). Re-running resumes.
+# runner (which records the run as "paused", not "failed"). Re-running resumes
+# - already-extracted/reconstructed timepoints are skipped by step0/step1.
 PAUSE_EXIT_CODE = 42
 
 
@@ -64,62 +75,11 @@ class PipelinePaused(Exception):
     """Raised when a step exits because a pause was requested."""
 
 
-VIDEO_EXTENSIONS = {".mov", ".mp4", ".mkv", ".avi"}
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".tiff", ".tif", ".png"}
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Small helpers
 # ---------------------------------------------------------------------------
-
-
-def fast_copy_file(src: Path, dst: Path) -> None:
-    """Copy a file using rsync (with progress) or fall back to cp.
-
-    rsync is typically faster than shutil.copy2 for large files and
-    supports resume on interruption.
-
-    Args:
-        src: Source file path.
-        dst: Destination file path.
-    """
-    rsync = shutil.which("rsync")
-    if rsync:
-        subprocess.run(
-            [rsync, "-ah", "--progress", "--partial", str(src), str(dst)],
-            check=True,
-        )
-    else:
-        # Fall back to cp which is still faster than shutil for large files
-        subprocess.run(["cp", "--preserve=timestamps", str(src), str(dst)], check=True)
-
-
-def parallel_copy_files(file_pairs: list, max_workers: int = 4) -> None:
-    """Copy multiple files in parallel using fast_copy_file.
-
-    Args:
-        file_pairs: List of (src_path, dst_path) tuples.
-        max_workers: Maximum concurrent copy operations.
-    """
-    if len(file_pairs) == 1:
-        src, dst = file_pairs[0]
-        print(f"    Copying {src.name}...")
-        fast_copy_file(src, dst)
-        return
-
-    workers = min(max_workers, len(file_pairs))
-    print(f"    Copying {len(file_pairs)} files ({workers} parallel workers)...")
-    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = {}
-        for src, dst in file_pairs:
-            futures[executor.submit(fast_copy_file, src, dst)] = src.name
-        for future in concurrent.futures.as_completed(futures):
-            name = futures[future]
-            try:
-                future.result()
-                print(f"    Copied {name}")
-            except Exception as exc:
-                print(f"    ERROR copying {name}: {exc}")
-                raise
 
 
 def banner(text: str) -> None:
@@ -128,6 +88,42 @@ def banner(text: str) -> None:
     print("=" * 60)
     print(f"  {text}")
     print("=" * 60)
+
+
+def _naming3d():
+    """Lazy import of the shared vicarius/_METADATA/3d naming rules (same
+    sys.path convention already used by registry_client.py and videos.py)."""
+    root = os.environ.get("VICARIUS_ROOT", "/mnt/rip/vicarius_drive/vicarius")
+    lib_dir = os.path.join(root, "_METADATA", "3d")
+    if lib_dir not in sys.path:
+        sys.path.insert(0, lib_dir)
+    import naming3d
+
+    return naming3d
+
+
+_PROCESSING_HEADER_RE = re.compile(r"^(processing:\s*\n)", re.MULTILINE)
+
+
+def _set_processing_scalar(params_path: Path, key: str, value: str) -> None:
+    """Set processing.<key>: <value> in a project's analysis_params.yaml in
+    place, preserving every comment and every other key - a targeted text
+    edit, not a YAML load/dump round-trip, so the human-editable template
+    (the one `open_params_for_editing` hands the user in vim) survives
+    untouched. Inserts right after the top-level `processing:` line when the
+    key is not already present under it; replaces the value in place when it
+    is. `value` must already be a valid YAML scalar (quote strings with
+    json.dumps() before calling).
+    """
+    text = params_path.read_text()
+    key_re = re.compile(rf"^(\s*){re.escape(key)}:\s*\S.*$", re.MULTILINE)
+    if key_re.search(text):
+        text = key_re.sub(lambda m: f"{m.group(1)}{key}: {value}", text, count=1)
+    elif _PROCESSING_HEADER_RE.search(text):
+        text = _PROCESSING_HEADER_RE.sub(lambda m: f"{m.group(1)}  {key}: {value}\n", text, count=1)
+    else:
+        text += f"\nprocessing:\n  {key}: {value}\n"
+    params_path.write_text(text)
 
 
 def detect_metashape() -> str:
@@ -159,117 +155,6 @@ def detect_metashape() -> str:
     )
 
 
-def detect_input_type(input_path: Path) -> str:
-    """Determine if input folder contains video files or frame directories.
-
-    Returns 'video' or 'frames'.
-    """
-    # Check for video files
-    videos = [
-        f
-        for f in input_path.iterdir()
-        if f.is_file()
-        and f.suffix.lower() in VIDEO_EXTENSIONS
-        and not f.name.startswith("._")
-    ]
-    if videos:
-        return "video"
-
-    # Check for subdirectories containing images
-    for subdir in input_path.iterdir():
-        if subdir.is_dir():
-            images = [
-                f for f in subdir.iterdir() if f.suffix.lower() in IMAGE_EXTENSIONS
-            ]
-            if images:
-                return "frames"
-
-    raise ValueError(
-        f"No video files or frame directories found in {input_path}\n"
-        f"Expected: video files ({', '.join(VIDEO_EXTENSIONS)}) "
-        f"or subdirectories of images ({', '.join(IMAGE_EXTENSIONS)})"
-    )
-
-
-def collect_input_names(input_path: Path, input_type: str) -> list:
-    """Collect filenames or directory names from the input path."""
-    if input_type == "video":
-        return [
-            f.name
-            for f in sorted(input_path.iterdir())
-            if f.is_file()
-            and f.suffix.lower() in VIDEO_EXTENSIONS
-            and not f.name.startswith("._")
-        ]
-    else:
-        return [
-            d.name
-            for d in sorted(input_path.iterdir())
-            if d.is_dir() and not d.name.startswith(".")
-        ]
-
-
-def validate_and_group(names: list, input_type: str) -> dict:
-    """Validate naming conventions and group multipart items.
-
-    Prints warnings for non-conforming names and unknown project types.
-    Returns grouped dict from group_multipart().
-    """
-    # Check for unknown project types
-    unknowns = check_unknown_values(names)
-    if unknowns["project_types"]:
-        print(f"\n  WARNING: Unknown project type(s): {', '.join(unknowns['project_types'])}")
-        for pt in unknowns["project_types"]:
-            definition = input(f"  Define '{pt}' (or press Enter to accept): ").strip()
-            if definition:
-                print(f"  Noted: {pt} = {definition}")
-
-    # Check for names that don't match the pattern at all
-    bad_names = []
-    for name in names:
-        stem = name.rsplit(".", 1)[0] if "." in name else name
-        clean = strip_proxy(stem)
-        if parse_model_name(clean) is None:
-            bad_names.append(name)
-
-    if bad_names:
-        print(f"\n  WARNING: {len(bad_names)} name(s) don't match expected pattern:")
-        print(f"  Pattern: {{PROJECTTYPE}}{{YYYYMMDD}}_3D_{{SITE}}_{{REPLICATE}}[_n][_PROXY]")
-        for bn in bad_names[:10]:
-            print(f"    - {bn}")
-        resp = input("\n  Continue anyway? (y/n): ").strip().lower()
-        if resp != "y":
-            print("Aborted.")
-            sys.exit(1)
-
-    groups = group_multipart(names)
-    return groups
-
-
-def prompt_inputs() -> tuple:
-    """Interactive prompts for input_path and project_dir."""
-    banner("3D Phase 1 - Setup + Frame Extraction + Initial 3D Processing")
-    print()
-    print("This tool will guide you through:")
-    print("  1. Detecting and validating your input files")
-    print("  2. Setting up the project directory structure")
-    print("  3. Running frame extraction (if video input)")
-    print("  4. Running initial 3D processing in Metashape")
-    print()
-
-    input_path = input("Input folder path (videos OR frame folders): ").strip().strip("'\"")
-    if not input_path:
-        print("Error: Input path required.")
-        sys.exit(1)
-
-    project_dir = input("Project directory path (will be created if needed): ").strip().strip("'\"")
-    if not project_dir:
-        print("Error: Project directory required.")
-        sys.exit(1)
-
-    return Path(input_path).expanduser().resolve(), Path(project_dir).expanduser().resolve()
-
-
 def create_venv(project_dir: Path) -> None:
     """Create Python 3.9 venv and install requirements."""
     venv_dir = project_dir / ".venv"
@@ -292,97 +177,6 @@ def create_venv(project_dir: Path) -> None:
 
     print("  Installing requirements...")
     subprocess.run([str(pip), "install", "-r", str(requirements_file)], check=True)
-
-
-def setup_project(
-    project_dir: Path,
-    input_path: Path,
-    input_type: str,
-    model_groups: dict,
-    copy_frames: bool = False,
-    copy_videos: bool = False,
-) -> None:
-    """Create project directory structure and populate with inputs.
-
-    Args:
-        project_dir: Root project directory to create.
-        input_path: Path containing source videos or frame directories.
-        input_type: Either 'video' or 'frames'.
-        model_groups: Dict from validate_and_group().
-        copy_frames: If True, copy frame dirs instead of symlinking.
-        copy_videos: If True, copy videos instead of symlinking.
-    """
-    banner("PROJECT SETUP")
-
-    # Create directories
-    print("  Creating directory structure...")
-    for subdir in ["video_source", "processing", "output"]:
-        (project_dir / subdir).mkdir(parents=True, exist_ok=True)
-
-    # Create venv
-    print("  Setting up Python environment...")
-    create_venv(project_dir)
-
-    # Copy analysis_params.yaml
-    params_dst = project_dir / "analysis_params.yaml"
-    if not params_dst.exists():
-        shutil.copy2(str(TEMPLATE_PARAMS), str(params_dst))
-        print(f"  Copied analysis_params.yaml to {project_dir}")
-    else:
-        print(f"  analysis_params.yaml already exists, keeping existing.")
-
-    # Copy or link input files
-    if input_type == "video":
-        video_source = project_dir / "video_source"
-        if copy_videos:
-            print("  Copying video files to video_source/ (rsync)...")
-            copy_pairs = []
-            for base_id, parts in model_groups.items():
-                for part_info in parts:
-                    src_file = input_path / part_info["original_name"]
-                    if src_file.exists():
-                        dst_file = video_source / part_info["original_name"]
-                        if not dst_file.exists():
-                            copy_pairs.append((src_file, dst_file))
-                        else:
-                            print(f"    {part_info['original_name']} already exists, skipping.")
-                    else:
-                        print(f"    WARNING: {src_file} not found, skipping.")
-            if copy_pairs:
-                parallel_copy_files(copy_pairs)
-        else:
-            print("  Symlinking video files to video_source/...")
-            for base_id, parts in model_groups.items():
-                for part_info in parts:
-                    src_file = input_path / part_info["original_name"]
-                    if src_file.exists():
-                        dst_file = video_source / part_info["original_name"]
-                        if not dst_file.exists():
-                            print(f"    Linking {part_info['original_name']}...")
-                            os.symlink(str(src_file.resolve()), str(dst_file))
-                        else:
-                            print(f"    {part_info['original_name']} already exists, skipping.")
-                    else:
-                        print(f"    WARNING: {src_file} not found, skipping.")
-    else:
-        frames_dir = project_dir / "processing" / "frames"
-        frames_dir.mkdir(parents=True, exist_ok=True)
-        action = "Copying" if copy_frames else "Linking"
-        print(f"  {action} frame directories to processing/frames/...")
-        for subdir in sorted(input_path.iterdir()):
-            if subdir.is_dir() and not subdir.name.startswith("."):
-                dst = frames_dir / subdir.name
-                if not dst.exists():
-                    if copy_frames:
-                        print(f"    Copying {subdir.name}/...")
-                        shutil.copytree(str(subdir), str(dst))
-                    else:
-                        print(f"    Linking {subdir.name}/...")
-                        os.symlink(str(subdir.resolve()), str(dst))
-                else:
-                    print(f"    {subdir.name} already exists, skipping.")
-
-    print("  Project setup complete.")
 
 
 def open_params_for_editing(project_dir: Path) -> None:
@@ -466,7 +260,7 @@ def print_manual_instructions(project_dir: Path) -> None:
     print("  Before running Phase 2, you must manually straighten and prepare")
     print("  each model in the Metashape GUI.")
     print()
-    print(f"  PSX files location: {project_dir / 'processing' / 'psxraw'}/")
+    print(f"  PSX file location: {project_dir}/")
     print()
     print("  For each chunk in each PSX file:")
     print()
@@ -506,105 +300,414 @@ def create_vicarius_run(purpose: str, study: str) -> Path:
     return run_dir
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="3D Phase 1: Setup + Frame Extraction + Initial 3D Processing"
-    )
-    parser.add_argument(
-        "--input", "-i", type=Path, help="Input folder path (videos OR frame folders)"
-    )
-    parser.add_argument(
-        "--project", "-p", type=Path, help="Project directory path"
-    )
-    parser.add_argument(
-        "--copy-videos",
-        action="store_true",
-        help="Copy videos instead of symlinking (default: symlink). "
-        "Uses rsync with parallel workers for faster transfers.",
-    )
-    parser.add_argument(
-        "--skip-vim",
-        action="store_true",
-        help="Skip opening analysis_params.yaml in vim",
-    )
-    parser.add_argument(
-        "--purpose",
-        type=str,
-        default=None,
-        help="Run purpose (Commandment VI). When set, the interactive purpose "
-        "prompt is skipped — used by the VICARIUS UI which collects this in "
-        "the form.",
-    )
-    parser.add_argument(
-        "--yes",
-        action="store_true",
-        help="Skip the SUMMARY confirmation prompt. Used by the VICARIUS UI "
-        "to run non-interactively when all inputs come from the form.",
-    )
-    args = parser.parse_args()
+def _link_output(vicarius_run_dir: Path, name: str, target: Path) -> None:
+    """Best-effort symlink of a project dir into the VICARIUS run's outputs/."""
+    if not vicarius_run_dir:
+        return
+    try:
+        outputs_dir = vicarius_run_dir / "outputs"
+        link = outputs_dir / name
+        if not link.exists():
+            os.symlink(str(target), str(link))
+    except Exception:
+        pass  # Non-critical
 
+
+# ---------------------------------------------------------------------------
+# TCRMP mode: registry-driven, processing folder next to the video
+# ---------------------------------------------------------------------------
+
+
+def _earliest_date_for(site: str, transect: str) -> str:
+    """Synthetic YYYYMMDD for the earliest known registry timepoint of a
+    site/transect (year + season_token -> YYYY0401 for _pbl, YYYY1001 for
+    ann), so the shared processing folder is always named for the earliest
+    timepoint even when a later one is processed first."""
+    rows = registry_client.rows_for(site=site, transect=transect) or []
+    dates = []
+    for r in rows:
+        year, token = r.get("year"), r.get("season_token")
+        if not year or token not in ("_pbl", "ann"):
+            continue
+        dates.append(f"{year}0401" if token == "_pbl" else f"{year}1001")
+    if not dates:
+        raise RuntimeError(f"No dated registry rows found for {site} {transect}")
+    return min(dates)
+
+
+def prepare_tcrmp_folder(row: dict) -> Path:
+    """Ensure the processing folder for a TCRMP registry row exists next to
+    its video, and record its location back into the registry before step 0
+    runs. Returns the project directory.
+
+    All timepoints of the same site+transect share one processing folder
+    and one growing psx: if any row of that site/transect already has a
+    processing_location, this reuses it (even if it differs from THIS row's
+    own video_location); a new folder is only created, next to THIS row's
+    video, when no row of that site/transect has one yet - named for the
+    earliest known timepoint regardless of processing order.
+    """
+    registry_client.configure({"processing": {"tcrmp": True}})
+    readable_id = row["readable_id"]
+    site, transect = row["site"], row["transect"]
+    video_location = row.get("video_location") or ""
+    if not os.path.isdir(video_location):
+        raise RuntimeError(
+            f"{readable_id}: video_location is not a local directory: {video_location!r}"
+        )
+
+    sibling_rows = registry_client.rows_for(site=site, transect=transect) or []
+    existing = next((r["processing_location"] for r in sibling_rows if r.get("processing_location")), None)
+
+    if existing:
+        project_dir = Path(existing)
+    else:
+        earliest_date = _earliest_date_for(site, transect)
+        folder_name = _naming3d().processing_folder_name(site, transect, earliest_date)
+        project_dir = Path(video_location) / folder_name
+
+    for sub in ("console", "frames", "reports"):
+        (project_dir / sub).mkdir(parents=True, exist_ok=True)
+
+    params_dst = project_dir / "analysis_params.yaml"
+    if not params_dst.exists():
+        shutil.copy2(str(TEMPLATE_PARAMS), str(params_dst))
+        print(f"    Copied analysis_params.yaml to {project_dir}")
+    _set_processing_scalar(params_dst, "tcrmp", "true")
+
+    registry_client.update(
+        readable_id,
+        processing_folder=project_dir.name,
+        processing_location=str(project_dir),
+        console_log=str(project_dir / "console"),
+    )
+    registry_client.stage(readable_id, 1, "starting")
+
+    status_rows.write_identity_row(project_dir, row.get("original_videos", ""), readable_id)
+
+    return project_dir
+
+
+def select_rows(args) -> list:
+    """Select the TCRMP registry rows this run should process, in
+    chronological order grouped by site/transect (the order the shared psx
+    needs, per naming3d.sort_key).
+
+    Reads only through registry_client, so process=false rows are already
+    excluded (registry_client.rows_for filters to process=="true"). --ids
+    (comma-separated) or --site/--transect narrow the selection; with none
+    of those given, every pending row is eligible. A row is skipped (with a
+    console note, never a prompt) when its video_location is not a local
+    directory that currently exists, or when its step1_status is already
+    "complete" and --force was not passed.
+    """
+    registry_client.configure({"processing": {"tcrmp": True}})
+    if not registry_client.enabled():
+        raise RuntimeError(
+            "TCRMP registry unavailable (shared library import failed at "
+            f"{os.environ.get('VICARIUS_ROOT', '/mnt/rip/vicarius_drive/vicarius')}/_METADATA/3d). "
+            "Pass --no-tcrmp to process a plain --input/--project pair instead."
+        )
+
+    ids = None
+    if getattr(args, "ids", None):
+        ids = [i.strip() for i in args.ids.split(",") if i.strip()]
+
+    rows = registry_client.rows_for(
+        site=getattr(args, "site", None), transect=getattr(args, "transect", None), ids=ids
+    ) or []
+    n3d = _naming3d()
+    rows = sorted(rows, key=lambda r: n3d.sort_key(r["readable_id"]))
+
+    force = bool(getattr(args, "force", False))
+    selected = []
+    for r in rows:
+        video_location = r.get("video_location") or ""
+        if not os.path.isdir(video_location):
+            print(f"    Skipping {r['readable_id']}: video_location is not a local directory ({video_location!r})")
+            continue
+        if r.get("step1_status") == "complete" and not force:
+            print(f"    Skipping {r['readable_id']}: step1_status already complete (pass --force to reprocess)")
+            continue
+        selected.append(r)
+    return selected
+
+
+def run_tcrmp_mode(args, metashape_path: str) -> None:
     start_time = time.time()
 
-    # ---- Get input/output paths ----
+    print("\nSelecting TCRMP timepoints from the registry...")
+    rows = select_rows(args)
+    if not rows:
+        print("  No TCRMP timepoints selected (nothing pending, or the filters matched nothing).")
+        return
+    print(f"  Selected {len(rows)} timepoint(s):")
+    for r in rows:
+        print(f"    {r['readable_id']}  ({r.get('original_videos', '')})")
+
+    banner("PURPOSE (Commandment VI)")
+    if args.purpose:
+        purpose = args.purpose.strip()
+        print(f"  Purpose (from --purpose): {purpose}")
+    else:
+        purpose = input("  Why are you running this? ").strip()
+    if not purpose:
+        purpose = "3D Phase 1 processing (TCRMP)"
+
+    vicarius_run_dir = None
+    try:
+        vicarius_run_dir = create_vicarius_run(purpose, "")
+        print(f"\n  VICARIUS run created: {vicarius_run_dir.name}")
+    except Exception as e:
+        print(f"\n  Warning: Could not create VICARIUS run: {e}")
+        print("  Continuing without VICARIUS run tracking.")
+
+    start_event = None
+    if VICARIUS_LOGGING:
+        try:
+            log = get_log()
+            start_event = log.process_start(
+                module=MODULE_NAME,
+                purpose=purpose,
+                inputs=[r["readable_id"] for r in rows],
+            )
+        except Exception as e:
+            print(f"  Warning: VICARIUS logging failed: {e}")
+
+    banner("SUMMARY")
+    print(f"  Mode:        TCRMP registry")
+    print(f"  Timepoints:  {len(rows)}")
+    for r in rows:
+        print(f"    {r['readable_id']}")
+    print(f"  Purpose:     {purpose}")
+    print()
+    if args.yes:
+        print("  Proceeding (--yes).")
+    else:
+        confirm = input("  Proceed? (y/n): ").strip().lower()
+        if confirm != "y":
+            print("Aborted.")
+            sys.exit(0)
+
+    opened_params_for = set()
+    processed_dirs = []
+    try:
+        for row in rows:
+            readable_id = row["readable_id"]
+            banner(f"TIMEPOINT: {readable_id}")
+            project_dir = prepare_tcrmp_folder(row)
+            print(f"  Processing folder: {project_dir}")
+            _link_output(vicarius_run_dir, readable_id, project_dir)
+
+            if not args.skip_vim and project_dir not in opened_params_for:
+                open_params_for_editing(project_dir)
+            opened_params_for.add(project_dir)
+
+            run_step0(project_dir)
+            run_step1(project_dir, metashape_path)
+            print_manual_instructions(project_dir)
+            processed_dirs.append(project_dir)
+
+    except PipelinePaused as e:
+        banner("PHASE 1 PAUSED")
+        print()
+        print(f"  {e}")
+        print(
+            f"  Re-run {MODULE_NAME} with the same selection to resume "
+            "(extracted / reconstructed timepoints are skipped)."
+        )
+        print()
+        if VICARIUS_LOGGING and start_event:
+            try:
+                log = get_log()
+                log.process_end(
+                    module=MODULE_NAME,
+                    status="paused",
+                    duration_sec=time.time() - start_time,
+                    parent_event_id=start_event,
+                    notes=str(e),
+                )
+            except Exception:
+                pass
+        sys.exit(PAUSE_EXIT_CODE)
+
+    except RuntimeError as e:
+        elapsed = time.time() - start_time
+        print(f"\nERROR: {e}")
+
+        if VICARIUS_LOGGING and start_event:
+            try:
+                log = get_log()
+                log.process_end(
+                    module=MODULE_NAME,
+                    status="failed",
+                    duration_sec=elapsed,
+                    parent_event_id=start_event,
+                    notes=str(e),
+                )
+            except Exception:
+                pass
+
+        sys.exit(1)
+
+    elapsed = time.time() - start_time
+    if VICARIUS_LOGGING and start_event:
+        try:
+            log = get_log()
+            log.process_end(
+                module=MODULE_NAME,
+                status="success",
+                duration_sec=elapsed,
+                outputs=[str(p) for p in processed_dirs],
+                parent_event_id=start_event,
+                notes=f"Processed {len(processed_dirs)} TCRMP timepoint(s)",
+            )
+        except Exception:
+            pass
+
+    hours = elapsed / 3600
+    if hours >= 1:
+        print(f"\n  Total runtime: {hours:.1f} hours")
+    else:
+        minutes = elapsed / 60
+        print(f"\n  Total runtime: {minutes:.1f} minutes")
+
+
+# ---------------------------------------------------------------------------
+# Non-TCRMP mode: plain --input/--project, no registry, no copying
+# ---------------------------------------------------------------------------
+
+
+def prompt_inputs() -> tuple:
+    """Interactive prompts for input_path and project_dir (non-TCRMP only)."""
+    banner("3D Phase 1 - Setup + Frame Extraction + Initial 3D Processing")
+    print()
+    print("This tool will guide you through:")
+    print("  1. Detecting and validating your input files")
+    print("  2. Setting up the project directory structure")
+    print("  3. Running frame extraction (if video input)")
+    print("  4. Running initial 3D processing in Metashape")
+    print()
+
+    input_path = input("Input folder path (videos OR frame folders): ").strip().strip("'\"")
+    if not input_path:
+        print("Error: Input path required.")
+        sys.exit(1)
+
+    project_dir = input("Project directory path (will be created if needed): ").strip().strip("'\"")
+    if not project_dir:
+        print("Error: Project directory required.")
+        sys.exit(1)
+
+    return Path(input_path).expanduser().resolve(), Path(project_dir).expanduser().resolve()
+
+
+def detect_input_type(input_path: Path) -> str:
+    """'video' when input_path holds video files (ffprobe-verified via
+    videos.is_video - extension is never consulted), 'frames' when it holds
+    subdirectories of images."""
+    if videos_mod.list_videos(str(input_path)):
+        return "video"
+
+    for subdir in sorted(input_path.iterdir()):
+        if subdir.is_dir() and not subdir.name.startswith("."):
+            images = [f for f in subdir.iterdir() if f.suffix.lower() in IMAGE_EXTENSIONS]
+            if images:
+                return "frames"
+
+    raise ValueError(
+        f"No video files or frame directories found in {input_path}\n"
+        f"Frame directories need images with extensions: {', '.join(sorted(IMAGE_EXTENSIONS))}"
+    )
+
+
+def collect_input_ids(input_path: Path, input_type: str) -> dict:
+    """Non-TCRMP ids = the original file name without extension (video, one
+    id per file - no multi-part merging) or the subdirectory name as-is
+    (frames). Returns {id: [source name(s)]}."""
+    if input_type == "video":
+        names = videos_mod.list_videos(str(input_path))
+        return videos_mod.group_parts(names, tcrmp=False)
+    return {
+        d.name: [d.name]
+        for d in sorted(input_path.iterdir())
+        if d.is_dir() and not d.name.startswith(".")
+    }
+
+
+def setup_project(project_dir: Path, input_path: Path, input_type: str, ids: dict) -> None:
+    """Create the project workspace. Frame-folder input is symlinked
+    (read-only) into frames/; video input is read in place from
+    input_path - nothing is copied or linked into the project for video
+    input, so step0 (Task 10) reads processing.video_input_dir from
+    analysis_params.yaml to find the source videos.
+    """
+    banner("PROJECT SETUP")
+
+    print("  Creating directory structure...")
+    for sub in ("frames", "reports", "console"):
+        (project_dir / sub).mkdir(parents=True, exist_ok=True)
+
+    print("  Setting up Python environment...")
+    create_venv(project_dir)
+
+    params_dst = project_dir / "analysis_params.yaml"
+    if not params_dst.exists():
+        shutil.copy2(str(TEMPLATE_PARAMS), str(params_dst))
+        print(f"  Copied analysis_params.yaml to {project_dir}")
+    else:
+        print("  analysis_params.yaml already exists, keeping existing.")
+    _set_processing_scalar(params_dst, "tcrmp", "false")
+
+    if input_type == "frames":
+        frames_dir = project_dir / "frames"
+        print("  Linking frame directories into frames/ (read-only input)...")
+        for name in ids:
+            src = input_path / name
+            dst = frames_dir / name
+            if dst.exists():
+                print(f"    {name} already exists, skipping.")
+                continue
+            print(f"    Linking {name}/...")
+            os.symlink(str(src.resolve()), str(dst))
+    else:
+        import json
+
+        _set_processing_scalar(params_dst, "video_input_dir", json.dumps(str(input_path)))
+        print(f"  Videos will be read in place from {input_path} (no copy, no link).")
+
+    print("  Project setup complete.")
+
+
+def run_non_tcrmp_mode(args, metashape_path: str) -> None:
+    start_time = time.time()
+
     if args.input and args.project:
         input_path = args.input.expanduser().resolve()
         project_dir = args.project.expanduser().resolve()
     else:
         input_path, project_dir = prompt_inputs()
 
-    # Validate input path exists
     if not input_path.exists() or not input_path.is_dir():
         print(f"Error: Input path does not exist or is not a directory: {input_path}")
         sys.exit(1)
 
-    # ---- Detect Metashape ----
-    print("\nDetecting Metashape installation...")
-    metashape_path = detect_metashape()
-    print(f"  Found: {metashape_path}")
-
-    # ---- Detect input type ----
     print("\nDetecting input type...")
     input_type = detect_input_type(input_path)
     print(f"  Detected: {input_type}")
-
     if input_type == "video":
         print("  Will run: Step 0 (frame extraction) -> Step 1 (3D processing)")
     else:
         print("  Will run: Step 1 (3D processing) [skipping Step 0]")
+    print("  Videos/frames are read in place; nothing is copied or symlinked into the project"
+          if input_type == "video" else
+          "  Frame directories are symlinked into the project (read-only input).")
 
-    # ---- Ask about video transfer mode (interactive only) ----
-    # Frames are always copied to maintain consistent filesystem structure.
-    # In non-interactive mode (--yes), default to symlink (matches the
-    # historical "press 1 / Enter" default).
-    copy_videos = args.copy_videos
-    copy_frames = True
-    if input_type == "video" and not args.copy_videos and not args.yes:
-        print()
-        print("  Video transfer mode:")
-        print("    1. Symlink (default) - instant, videos stay in original location")
-        print("    2. Copy - slower, but needed if source will be disconnected")
-        transfer = input("  Choose [1/2]: ").strip()
-        if transfer == "2":
-            copy_videos = True
-            print("  Will copy videos (rsync, parallel).")
-        else:
-            print("  Will symlink videos.")
-    elif input_type == "video" and args.yes and not args.copy_videos:
-        print("  Video transfer mode: symlink (--yes default; pass --copy-videos for rsync).")
+    ids = collect_input_ids(input_path, input_type)
+    print(f"\n  Found {len(ids)} model(s):")
+    for model_id in ids:
+        print(f"    {model_id}")
 
-    # ---- Validate names ----
-    print("\nValidating naming conventions...")
-    names = collect_input_names(input_path, input_type)
-    print(f"  Found {len(names)} item(s)")
-    model_groups = validate_and_group(names, input_type)
-    print(f"  Grouped into {len(model_groups)} model(s):")
-    for base_id, parts in model_groups.items():
-        if len(parts) > 1:
-            print(f"    {base_id} ({len(parts)} parts)")
-        else:
-            print(f"    {base_id}")
-
-    # ---- VICARIUS: Purpose (Commandment VI) ----
     banner("PURPOSE (Commandment VI)")
     if args.purpose:
         purpose = args.purpose.strip()
@@ -614,7 +717,6 @@ def main():
     if not purpose:
         purpose = "3D Phase 1 processing"
 
-    # ---- Create VICARIUS run ----
     vicarius_run_dir = None
     try:
         vicarius_run_dir = create_vicarius_run(purpose, "")
@@ -623,7 +725,6 @@ def main():
         print(f"\n  Warning: Could not create VICARIUS run: {e}")
         print("  Continuing without VICARIUS run tracking.")
 
-    # ---- Log process start ----
     start_event = None
     if VICARIUS_LOGGING:
         try:
@@ -636,17 +737,10 @@ def main():
         except Exception as e:
             print(f"  Warning: VICARIUS logging failed: {e}")
 
-    # ---- Confirmation ----
-    if input_type == "video":
-        transfer_mode = "copy (rsync)" if copy_videos else "symlink"
-    else:
-        transfer_mode = "copy" if copy_frames else "symlink"
-
     banner("SUMMARY")
     print(f"  Input:       {input_path}")
     print(f"  Input type:  {input_type}")
-    print(f"  Transfer:    {transfer_mode}")
-    print(f"  Models:      {len(model_groups)}")
+    print(f"  Models:      {len(ids)}")
     print(f"  Project dir: {project_dir}")
     print(f"  Purpose:     {purpose}")
     print()
@@ -658,32 +752,21 @@ def main():
             print("Aborted.")
             sys.exit(0)
 
-    # ---- Setup project ----
     try:
-        setup_project(
-            project_dir, input_path, input_type, model_groups,
-            copy_frames=copy_frames,
-            copy_videos=copy_videos,
-        )
+        setup_project(project_dir, input_path, input_type, ids)
     except Exception as e:
         print(f"\nError during project setup: {e}")
         sys.exit(1)
 
-    # ---- Symlink project in VICARIUS run ----
-    if vicarius_run_dir:
-        try:
-            outputs_dir = vicarius_run_dir / "outputs"
-            project_link = outputs_dir / "project"
-            if not project_link.exists():
-                os.symlink(str(project_dir), str(project_link))
-        except Exception:
-            pass  # Non-critical
+    _link_output(vicarius_run_dir, "project", project_dir)
 
-    # ---- Edit analysis params ----
+    for model_id, sources in ids.items():
+        original_videos = ", ".join(sources) if input_type == "video" else ""
+        status_rows.write_identity_row(project_dir, original_videos, model_id)
+
     if not args.skip_vim:
         open_params_for_editing(project_dir)
 
-    # ---- Run processing ----
     try:
         if input_type == "video":
             run_step0(project_dir)
@@ -732,10 +815,8 @@ def main():
 
         sys.exit(1)
 
-    # ---- Print manual instructions ----
     print_manual_instructions(project_dir)
 
-    # ---- Log completion ----
     elapsed = time.time() - start_time
     if VICARIUS_LOGGING and start_event:
         try:
@@ -746,7 +827,7 @@ def main():
                 duration_sec=elapsed,
                 outputs=[str(project_dir)],
                 parent_event_id=start_event,
-                notes=f"Processed {len(model_groups)} model(s), input_type={input_type}",
+                notes=f"Processed {len(ids)} model(s), input_type={input_type}",
             )
         except Exception:
             pass
@@ -757,6 +838,73 @@ def main():
     else:
         minutes = elapsed / 60
         print(f"\n  Total runtime: {minutes:.1f} minutes")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="3D Phase 1: Setup + Frame Extraction + Initial 3D Processing"
+    )
+    parser.add_argument(
+        "--tcrmp", dest="tcrmp", action="store_true", default=True,
+        help="Registry-driven mode (default): select TCRMP timepoints from the shared "
+        "3D registry and process each next to its own video. No --input/--project needed.",
+    )
+    parser.add_argument(
+        "--no-tcrmp", dest="tcrmp", action="store_false",
+        help="Process a plain --input/--project pair instead (original names, no registry).",
+    )
+    parser.add_argument(
+        "--ids", type=str, default=None,
+        help="TCRMP mode: comma-separated readable ids to process, e.g. "
+        "MRS_T1_2023ann,MRS_T1_2024_pbl. Unset selects by --site/--transect, or, if those "
+        "are also unset, every pending timepoint.",
+    )
+    parser.add_argument("--site", type=str, default=None, help="TCRMP mode: registry site code to select, e.g. MRS.")
+    parser.add_argument(
+        "--transect", type=str, default=None, help="TCRMP mode: registry transect code to select, e.g. T1."
+    )
+    parser.add_argument(
+        "--force", action="store_true",
+        help="TCRMP mode: reprocess timepoints whose step1_status is already complete.",
+    )
+    parser.add_argument(
+        "--input", "-i", type=Path, default=None,
+        help="Non-TCRMP mode: input folder path (videos OR frame folders).",
+    )
+    parser.add_argument(
+        "--project", "-p", type=Path, default=None,
+        help="Non-TCRMP mode: project directory path (created if needed). Ignored in TCRMP "
+        "mode, where each timepoint's folder is derived from the registry.",
+    )
+    parser.add_argument(
+        "--skip-vim",
+        action="store_true",
+        help="Skip opening analysis_params.yaml in vim",
+    )
+    parser.add_argument(
+        "--purpose",
+        type=str,
+        default=None,
+        help="Run purpose (Commandment VI). When set, the interactive purpose "
+        "prompt is skipped - used by the VICARIUS UI which collects this in "
+        "the form.",
+    )
+    parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Skip the SUMMARY confirmation prompt. Used by the VICARIUS UI "
+        "to run non-interactively when all inputs come from the form.",
+    )
+    args = parser.parse_args()
+
+    print("\nDetecting Metashape installation...")
+    metashape_path = detect_metashape()
+    print(f"  Found: {metashape_path}")
+
+    if args.tcrmp:
+        run_tcrmp_mode(args, metashape_path)
+    else:
+        run_non_tcrmp_mode(args, metashape_path)
 
 
 if __name__ == "__main__":
