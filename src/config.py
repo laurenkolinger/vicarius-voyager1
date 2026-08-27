@@ -42,10 +42,8 @@ def load_yaml(yaml_path):
     # Validate required processing parameters for all steps
     required_processing = [
         'frames_per_transect',                    # Step 0
-        'chunk_size', 'use_gpu', 'metashape',     # Step 1
-        'chunk_management',                       # Step 2
-        'model_processing',                       # Step 3
-        'final_exports'                           # Step 4
+        'use_gpu', 'metashape', 'step1_products',  # Step 1
+        'model_processing',                       # Step 1 (scaling)
     ]
     
     for param in required_processing:
@@ -151,7 +149,6 @@ PROJECT_NOTES = PARAMS['project'].get('notes', '')
 
 # Metashape processing parameters
 METASHAPE_DEFAULTS = PARAMS['processing']['metashape']['defaults']
-CHUNK_SIZE = PARAMS['processing']['chunk_size']
 USE_GPU = PARAMS['processing']['use_gpu']
 MAX_CHUNKS_PER_PSX = PARAMS['processing'].get('max_chunks_per_psx', 5)
 

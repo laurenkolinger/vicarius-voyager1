@@ -36,24 +36,12 @@ inputs:
 # OUTPUTS
 # ------------------------------------------------------------------------------
 outputs:
-  - dataset: "3D_phase1_psx_files"          # step1 Metashape projects (draft 3D models)
-    path_template: "${project_dir}/processing/psxraw/psx_{N}_{YYYYMMDD}.psx"
+  - dataset: "3D_phase_1_psx"               # the site/transect psx bundle, appended across timepoints
+    path_template: "${project_dir}/{SITE}_{TRANSECT}_{FIRST_YEAR}_{LAST_YEAR}.psx"
     eml: true
 
-  - dataset: "3D_phase1_extracted_frames"   # 16-bit TIFF frames per model
-    path_template: "${project_dir}/processing/frames/{MODEL_ID}/"
-    eml: true
-
-  - dataset: "3D_phase1_tracking_csv"       # per-project processing status table
-    path_template: "${project_dir}/status_{PROJECT_NAME}.csv"
-    eml: true
-
-  - dataset: "3D_phase1_step1_reports"      # Metashape step-1 PDF reports
-    path_template: "${project_dir}/processing/reportsraw/{MODEL_ID}_step1.pdf"
-    eml: true
-
-  - dataset: "3D_init_dems"                 # Digital elevation model GeoTIFF from Ultra High depth maps, native resolution, local metres when scaled.
-    path_template: "${project_dir}/output/dems/{MODEL_ID}/{MODEL_ID}_dem.tif"
+  - dataset: "3D_phase_1_step1_reports"     # Metashape step-1 PDF report, one per timepoint
+    path_template: "${project_dir}/reports/{READABLE_ID}_step1.pdf"
     eml: true
 
 # ------------------------------------------------------------------------------
@@ -90,38 +78,29 @@ parameters:
       TCRMP mode only. Comma-separated readable ids to process, e.g.
       MRS_T1_2023ann,MRS_T1_2024_pbl. Leave blank to select by site/transect
       below, or, if those are also blank, every pending timepoint in the
-      registry. Not yet writethrough-wired (see cli.flag_map below); pass
-      --ids on a terminal launch for a scoped run.
+      registry. Sent to the script as --ids via cli.flag_map (see below).
 
   - name: "site"
     type: "string"
     default: ""
     description: >-
       TCRMP mode only. Registry site code to select, e.g. MRS. Leave blank
-      together with transect to select every pending timepoint. Not yet
-      writethrough-wired (see cli.flag_map below); pass --site on a
-      terminal launch for a scoped run.
+      together with transect to select every pending timepoint. Sent to the
+      script as --site via cli.flag_map (see below).
 
   - name: "transect"
     type: "string"
     default: ""
     description: >-
       TCRMP mode only. Registry transect code to select, e.g. T1. Leave
-      blank together with site to select every pending timepoint. Not yet
-      writethrough-wired (see cli.flag_map below); pass --transect on a
-      terminal launch for a scoped run.
+      blank together with site to select every pending timepoint. Sent to
+      the script as --transect via cli.flag_map (see below).
 
   - name: "frames_per_transect"
     type: "integer"
     default: 1000
     analysis_path: "processing.frames_per_transect"
     description: "Number of frames to extract per video/transect"
-
-  - name: "chunk_size"
-    type: "integer"
-    default: 1000
-    analysis_path: "processing.chunk_size"
-    description: "Maximum frames per Metashape chunk"
 
   - name: "max_chunks_per_psx"
     type: "integer"
@@ -135,24 +114,14 @@ parameters:
     analysis_path: "processing.use_gpu"
     description: "Enable GPU acceleration for Metashape processing"
 
-  - name: "scale_in_step1"
-    type: "boolean"
-    default: true
-    analysis_path: "processing.step1_products.scale_in_step1"
+  - name: "scale_error_threshold"
+    type: "float"
+    default: 0.009
+    analysis_path: "processing.model_processing.scale_error_threshold"
     description: >-
-      Detect the coded scale targets and apply the two 0.75 m scale bars after
-      the model builds so the DEM comes out in metres. Turn off only for models
-      filmed without targets; unscaled models get native-unit products and a
-      4-page texture.
-
-  - name: "build_dem"
-    type: "boolean"
-    default: true
-    analysis_path: "processing.step1_products.build_dem"
-    description: >-
-      Build a digital elevation model from the Ultra High depth maps after
-      scaling and export it as GeoTIFF under output/dems. The later
-      orthomosaic step and rugosity metrics both consume this DEM.
+      Maximum acceptable scale error in metres, measured against the two
+      0.75 m scale bars, before a timepoint is marked MANUAL_NEEDED instead
+      of PASS. Default 0.009 (9 mm).
 
   - name: "decimation_factor"
     type: "integer"
@@ -217,18 +186,22 @@ cli:
     purpose_flag: "--purpose"
     yes_flag: "--yes"
     skip_vim_flag: "--skip-vim"
-    # TCRMP mode is the module default and needs no toggle from the runner: a
-    # launch with input_dir/output_dir left blank already processes every
-    # pending registry timepoint hands-free through purpose_flag/yes_flag/
+    # Beyond the five keys above, the runner forwards every remaining
+    # `<name>_flag` entry generically: it looks up the matching parameter in
+    # `parameters:` above by name, reads the submitted (or default) value,
+    # and emits the flag. A boolean parameter sends `<name>_flag` alone when
+    # true, and `<name>_off_flag` (if declared) when false; a string,
+    # integer, or float parameter sends `[<name>_flag, value]` when the
+    # value is non-empty and nothing when it is blank. TCRMP mode is the
+    # module default and needs no toggle for the common case: a launch with
+    # input_dir/output_dir left blank already processes every pending
+    # registry timepoint hands-free through purpose_flag/yes_flag/
     # skip_vim_flag alone (run_phase1.py's own --tcrmp default does the
     # rest). tcrmp_flag/tcrmp_off_flag/ids_flag/site_flag/transect_flag/
-    # force_flag document the full CLI contract for a scoped or forced TCRMP
-    # run (one site and transect, specific ids, or reprocessing a completed
-    # timepoint) and for turning TCRMP mode off. For a boolean parameter the
-    # runner is expected to send <name>_flag when the value is true and
-    # <name>_off_flag when it is false - tcrmp is the one boolean parameter
-    # here with a meaningful off state (--no-tcrmp); force has none (its
-    # off state is simply omitting --force).
+    # force_flag cover a scoped or forced TCRMP run (one site and transect,
+    # specific ids, or reprocessing a completed timepoint) and turning
+    # TCRMP mode off; force has no off flag (its off state is simply
+    # omitting --force).
     tcrmp_flag: "--tcrmp"
     tcrmp_off_flag: "--no-tcrmp"
     ids_flag: "--ids"
