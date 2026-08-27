@@ -16,6 +16,44 @@ import math
 SENTINEL_ERROR = 999.0
 SCALEBAR_ACCURACY = 0.001  # metres, same value Phase 2 hardcodes
 
+# Scale never blocks a run. It either verifies (PASS) or routes the timepoint
+# to the manual gate (MANUAL_NEEDED); processing continues either way, with
+# the unscaled branches applying downstream (fixed texture pages, "unscaled
+# units" on the DEM resolution).
+PASS = "PASS"
+MANUAL_NEEDED = "MANUAL_NEEDED"
+
+
+def ppm(error_m, bar_length_m):
+    """Scale-bar error in parts per million: error_m / bar_length_m x 1e6,
+    rounded to a whole ppm.
+
+    error_m is the mean absolute bar error already averaged over the bars,
+    so bar_length_m is the nominal (declared) bar length - the mean declared
+    length when the bars differ. Returns 0 when no usable bar length is
+    known, which is also what a run with no bars at all reports.
+    """
+    try:
+        length = float(bar_length_m)
+    except (TypeError, ValueError):
+        return 0
+    if length <= 0:
+        return 0
+    return int(round(float(error_m) / length * 1e6))
+
+
+def decide(bars_added, mean_error_m, threshold_m):
+    """PASS or MANUAL_NEEDED for a scaling attempt.
+
+    PASS needs both halves of the evidence: at least two scale bars actually
+    built (one bar cannot corroborate itself) and a mean absolute bar error
+    under the threshold. Anything else - no bars, one bar, two bars that
+    disagree - is MANUAL_NEEDED.
+    """
+    if bars_added >= 2 and mean_error_m < threshold_m:
+        return PASS
+    return MANUAL_NEEDED
+
 
 def find_marker_by_label(chunk, label):
     for marker in chunk.markers:
@@ -137,13 +175,15 @@ def mean_scale_bar_error(chunk):
 def apply_scale(Metashape, chunk, model_config, log):
     """Detect targets, build the declared scale bars, apply the transform.
 
-    Returns (status, mean_abs_error_m) with status "PASS" or "FAIL".
+    Returns (status, mean_abs_error_m, bars_added): status from decide(), the
+    mean absolute scale-bar error in metres (SENTINEL_ERROR when no bar could
+    be measured), and how many bars were actually built.
     """
     scale_bars = model_config.get("scale_bars", []) or []
     threshold = model_config.get("scale_error_threshold", 0.009)
     if not model_config.get("has_coded_scales", True) or not scale_bars:
         log("Scaling skipped: no coded scales declared in analysis_params")
-        return "FAIL", SENTINEL_ERROR
+        return MANUAL_NEEDED, SENTINEL_ERROR, 0
 
     chunk.detectMarkers(
         target_type=Metashape.TargetType.CircularTarget20bit,
@@ -161,13 +201,13 @@ def apply_scale(Metashape, chunk, model_config, log):
     added = add_scale_bars(chunk, scale_bars, log)
     if added == 0:
         log("ERROR: no scale bars could be added")
-        return "FAIL", SENTINEL_ERROR
+        return MANUAL_NEEDED, SENTINEL_ERROR, 0
 
     chunk.updateTransform()
     error = mean_scale_bar_error(chunk)
-    status = "PASS" if error < threshold else "FAIL"
+    status = decide(added, error, threshold)
     log(f"Scale {status}: mean abs error {error:.6f} m over {added} bar(s), threshold {threshold} m")
-    return status, error
+    return status, error, added
 
 
 def compute_texture_pages(area_m2, texel_m, page_size, scaled, unscaled_pages):

@@ -101,15 +101,49 @@ def quiet(_msg):
     pass
 
 
+class PpmTests(unittest.TestCase):
+    def test_plan_case(self):
+        self.assertEqual(scale_utils.ppm(0.0014, 0.75), 1867)
+
+    def test_rounds_to_whole_ppm(self):
+        self.assertEqual(scale_utils.ppm(0.009, 0.75), 12000)
+        self.assertEqual(scale_utils.ppm(0.0, 0.75), 0)
+
+    def test_sentinel_error_is_a_recognisable_marker(self):
+        self.assertEqual(scale_utils.ppm(scale_utils.SENTINEL_ERROR, 0.75), 1332000000)
+
+    def test_non_positive_bar_length_is_zero(self):
+        self.assertEqual(scale_utils.ppm(0.0014, 0.0), 0)
+        self.assertEqual(scale_utils.ppm(0.0014, -1.0), 0)
+
+
+class DecideTests(unittest.TestCase):
+    def test_two_bars_under_threshold_pass(self):
+        self.assertEqual(scale_utils.decide(2, 0.002, 0.009), "PASS")
+
+    def test_one_bar_needs_manual(self):
+        self.assertEqual(scale_utils.decide(1, 0.001, 0.009), "MANUAL_NEEDED")
+
+    def test_two_bars_over_threshold_needs_manual(self):
+        self.assertEqual(scale_utils.decide(2, 0.05, 0.009), "MANUAL_NEEDED")
+
+    def test_no_bars_needs_manual(self):
+        self.assertEqual(scale_utils.decide(0, scale_utils.SENTINEL_ERROR, 0.009), "MANUAL_NEEDED")
+
+    def test_three_bars_under_threshold_pass(self):
+        self.assertEqual(scale_utils.decide(3, 0.008999, 0.009), "PASS")
+
+
 class ApplyScaleTests(unittest.TestCase):
     def test_two_bars_within_threshold_pass(self):
         chunk = FakeChunk([
             ("target 1000", (0.0, 0.0, 0.0)), ("target 1010", (0.752, 0.0, 0.0)),
             ("target 1020", (0.0, 1.0, 0.0)), ("target 1030", (0.748, 1.0, 0.0)),
         ])
-        status, error = scale_utils.apply_scale(FakeMetashape, chunk, CONFIG, quiet)
+        status, error, bars = scale_utils.apply_scale(FakeMetashape, chunk, CONFIG, quiet)
         self.assertEqual(status, "PASS")
         self.assertAlmostEqual(error, 0.002, places=6)
+        self.assertEqual(bars, 2)
         self.assertEqual(len(chunk.scalebars), 2)
         self.assertEqual(chunk.scalebars[0].reference.distance, 0.75)
         self.assertEqual(chunk.scalebars[0].reference.accuracy, 0.001)
@@ -120,25 +154,28 @@ class ApplyScaleTests(unittest.TestCase):
             ("target 1000", (0.0, 0.0, 0.0)), ("target 1010", (0.80, 0.0, 0.0)),
             ("target 1020", (0.0, 1.0, 0.0)), ("target 1030", (0.80, 1.0, 0.0)),
         ])
-        status, error = scale_utils.apply_scale(FakeMetashape, chunk, CONFIG, quiet)
-        self.assertEqual(status, "FAIL")
+        status, error, bars = scale_utils.apply_scale(FakeMetashape, chunk, CONFIG, quiet)
+        self.assertEqual(status, "MANUAL_NEEDED")
         self.assertAlmostEqual(error, 0.05, places=6)
+        self.assertEqual(bars, 2)
 
-    def test_single_bar_when_pair_missing(self):
+    def test_single_bar_needs_manual_scaling(self):
         chunk = FakeChunk([
             ("target 1000", (0.0, 0.0, 0.0)), ("target 1010", (0.751, 0.0, 0.0)),
             ("target 1020", (0.0, 1.0, 0.0)),
         ])
-        status, error = scale_utils.apply_scale(FakeMetashape, chunk, CONFIG, quiet)
-        self.assertEqual(status, "PASS")
+        status, error, bars = scale_utils.apply_scale(FakeMetashape, chunk, CONFIG, quiet)
+        self.assertEqual(status, "MANUAL_NEEDED")
         self.assertEqual(len(chunk.scalebars), 1)
+        self.assertEqual(bars, 1)
         self.assertAlmostEqual(error, 0.001, places=6)
 
-    def test_no_markers_fails_with_sentinel(self):
+    def test_no_markers_needs_manual_with_sentinel(self):
         chunk = FakeChunk([])
-        status, error = scale_utils.apply_scale(FakeMetashape, chunk, CONFIG, quiet)
-        self.assertEqual(status, "FAIL")
+        status, error, bars = scale_utils.apply_scale(FakeMetashape, chunk, CONFIG, quiet)
+        self.assertEqual(status, "MANUAL_NEEDED")
         self.assertEqual(error, 999.0)
+        self.assertEqual(bars, 0)
 
     def test_unlisted_markers_removed(self):
         chunk = FakeChunk([
@@ -151,10 +188,11 @@ class ApplyScaleTests(unittest.TestCase):
 
     def test_no_coded_scales_declared_skips(self):
         chunk = FakeChunk([("target 1000", (0.0, 0.0, 0.0))])
-        status, error = scale_utils.apply_scale(
+        status, error, bars = scale_utils.apply_scale(
             FakeMetashape, chunk, {"has_coded_scales": False, "scale_bars": []}, quiet)
-        self.assertEqual(status, "FAIL")
+        self.assertEqual(status, "MANUAL_NEEDED")
         self.assertEqual(error, 999.0)
+        self.assertEqual(bars, 0)
         self.assertEqual(chunk.detect_calls, [])
 
 
