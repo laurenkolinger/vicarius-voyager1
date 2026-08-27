@@ -522,6 +522,12 @@ def run_tcrmp_mode(args, metashape_path: str) -> None:
             opened_params_for.add(project_dir)
 
             run_step0(project_dir)
+            if getattr(args, "force", False):
+                # select_rows let this row through on step1_status alone;
+                # step1.py skips on its own status.csv cell, so clear that
+                # too or the forced rerun would do nothing.
+                status_rows.reset_step1(project_dir, readable_id)
+                print(f"  --force: cleared the step 1 verdict for {readable_id} in status.csv")
             run_step1(project_dir, metashape_path)
             print_manual_instructions(project_dir)
             processed_dirs.append(project_dir)

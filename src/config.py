@@ -209,7 +209,7 @@ def initialize_tracking(model_id):
                     current_header = rows[0]
                     # **FIXED: Detect corrupted CSV (header split across lines)**
                     if len(rows) > 1 and len(rows[1]) == len(current_header) and rows[1][0] == headers[0]:
-                        print(f"🔧 DETECTED CORRUPTED CSV: Header split across lines in {tracking_file}. Fixing...")
+                        print(f"DETECTED CORRUPTED CSV: Header split across lines in {tracking_file}. Fixing...")
                         file_exists = False  # Force recreation
         except Exception as e:
             print(f"Warning: Could not read existing tracking file {tracking_file}: {e}. Will recreate.")
@@ -431,7 +431,7 @@ def get_transect_status(model_id):
     
     # **FIXED: Detect and handle corrupted CSV**
     if len(rows) > 1 and len(rows[1]) == len(header) and rows[1][0] == headers[0]:
-        print(f"🔧 CORRUPTED CSV detected in get_transect_status. Recreating...")
+        print(f"CORRUPTED CSV detected in get_transect_status. Recreating...")
         initialize_tracking(model_id)
         return {"Status": "Initialized"}  # Return basic status
     

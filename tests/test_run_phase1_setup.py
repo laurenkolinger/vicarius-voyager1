@@ -20,6 +20,7 @@ sys.path.insert(0, SRC)
 
 import registry_client  # noqa: E402
 import run_phase1  # noqa: E402
+import status_rows  # noqa: E402
 
 LIB_DIR = os.environ.get("VICARIUS_ROOT", "/mnt/rip/vicarius_drive/vicarius") + "/_METADATA/3d"
 sys.path.insert(0, LIB_DIR)
@@ -217,6 +218,71 @@ class RunPhase1SetupTests(unittest.TestCase):
         self.assertEqual(self.mock_create_venv.call_count, 1)
         self.assertEqual(self.venv_calls, [project_dir_first])
         self.assertTrue((project_dir_first / ".venv" / "bin" / "python").exists())
+
+
+class ResetStep1Tests(unittest.TestCase):
+    """status_rows.reset_step1 is what makes --force reach step 1: step1.py
+    skips on the status.csv cell, not on the registry. Runs on a throwaway
+    project folder with no registry and no Metashape."""
+
+    def setUp(self):
+        self.project_dir = tempfile.mkdtemp()
+        shutil.copy(os.path.join(os.path.dirname(HERE), "analysis_params.yaml"),
+                    os.path.join(self.project_dir, "analysis_params.yaml"))
+
+    def tearDown(self):
+        shutil.rmtree(self.project_dir, ignore_errors=True)
+
+    def _row(self, readable_id):
+        with open(os.path.join(self.project_dir, "status.csv"), newline="") as fh:
+            for row in csv.DictReader(fh):
+                if row["Model ID"] == readable_id:
+                    return row
+        return None
+
+    def test_clears_the_verdict_and_leaves_the_rest_of_the_row(self):
+        readable_id = "MRS_T1_2023ann"
+        status_rows.write_identity_row(
+            self.project_dir, "TCRMP20231015_3D_MRS_T1.MOV", readable_id)
+        config = status_rows._config_for(self.project_dir)
+        config.update_tracking(readable_id, {
+            "Step 1 complete": "True",
+            "Status": "Step 1 complete",
+            "PSX file": "/somewhere/MRS_T1_2023_2023.psx",
+            "Step 1 processing time (s)": "42.0",
+            "Scale": "PASS",
+        })
+
+        status_rows.reset_step1(self.project_dir, readable_id)
+
+        row = self._row(readable_id)
+        self.assertEqual(row["Step 1 complete"], "False")
+        self.assertEqual(row["Status"], "Forced rerun")
+        # Everything the finished run recorded survives for the rerun to
+        # overwrite, so a failed rerun does not erase the history.
+        self.assertEqual(row["PSX file"], "/somewhere/MRS_T1_2023_2023.psx")
+        self.assertEqual(row["Step 1 processing time (s)"], "42.0")
+        self.assertEqual(row["Scale"], "PASS")
+        self.assertEqual(row["readable_id"], readable_id)
+        self.assertEqual(row["original_videos"], "TCRMP20231015_3D_MRS_T1.MOV")
+
+    def test_creates_the_row_when_the_timepoint_has_none(self):
+        readable_id = "MRS_T1_2024_pbl"
+        status_rows.reset_step1(self.project_dir, readable_id)
+        row = self._row(readable_id)
+        self.assertIsNotNone(row)
+        self.assertEqual(row["Step 1 complete"], "False")
+        self.assertEqual(row["Status"], "Forced rerun")
+
+    def test_is_idempotent(self):
+        readable_id = "MRS_T1_2023ann"
+        status_rows.write_identity_row(self.project_dir, "v.MOV", readable_id)
+        status_rows.reset_step1(self.project_dir, readable_id)
+        status_rows.reset_step1(self.project_dir, readable_id)
+        with open(os.path.join(self.project_dir, "status.csv"), newline="") as fh:
+            rows = [r for r in csv.DictReader(fh) if r["Model ID"] == readable_id]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["Step 1 complete"], "False")
 
 
 if __name__ == "__main__":

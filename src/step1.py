@@ -25,6 +25,7 @@ the psx and stays there - step 1 exports no raster.
 """
 
 import os
+import gc
 import logging
 import Metashape
 import datetime
@@ -173,11 +174,16 @@ def range_psx_paths(project_dir, site, transect):
     return [path for _first, _last, path in found]
 
 
-def current_psx(project_dir, site, transect, year, cap, count_chunks):
+def current_psx(project_dir, site, transect, year, cap, count_chunks, preferred=None):
     """Resolve the psx a site and transect's next timepoint belongs in.
 
-    Returns (path, is_new). The newest range-named psx for the site and
-    transect is reused when it still holds fewer than `cap` chunks;
+    Returns (path, is_new). `preferred` is the psx the registry already
+    records for this site and transect: when it exists on disk and still
+    holds fewer than `cap` chunks it wins outright, because the registry
+    knows about bundles a name scan cannot reconstruct (a numbered collision
+    sibling, a bundle whose range rename was refused). Otherwise the newest
+    range-named psx for the site and transect is reused when it still holds
+    fewer than `cap` chunks;
     count_chunks(path) -> int is injected so this stays testable without
     Metashape and so a bundle that cannot be opened (counted as 0) is reused
     and handled by process_model's quarantine branch. At the cap, or with no
@@ -186,6 +192,9 @@ def current_psx(project_dir, site, transect, year, cap, count_chunks):
     (two timepoints of one year with a cap of 1) gets a numbered sibling
     rather than being opened and appended to.
     """
+    if preferred and os.path.exists(preferred) and count_chunks(preferred) < cap:
+        return preferred, False
+
     existing = range_psx_paths(project_dir, site, transect)
     if existing:
         newest = existing[-1]
@@ -202,46 +211,89 @@ def current_psx(project_dir, site, transect, year, cap, count_chunks):
     return path, True
 
 
+def psx_range_target(path, years):
+    """Where a bundle should live for `years`, or None when no move is due:
+    the name is not a range name (non-TCRMP psx files are left alone), no
+    years were given, or the name is already correct."""
+    parts = psx_range_parts(path)
+    if parts is None or not years:
+        return None
+    target = os.path.join(os.path.dirname(path),
+                          naming3d().psx_range_name(parts[0], parts[1], years))
+    if os.path.abspath(target) == os.path.abspath(path):
+        return None
+    return target
+
+
+def files_dir_for(psx_path):
+    """The sibling .files directory Metashape addresses by the psx stem."""
+    return psx_path[:-len(".psx")] + ".files"
+
+
 def rename_psx_range(path, years):
     """Move a range-named psx bundle to the year range its chunks now cover.
 
-    Both halves move: the .psx file and its sibling .files directory (which
-    Metashape addresses by the project's own stem). Returns the path the
-    bundle lives at afterwards, unchanged when the name already matches, when
-    the name is not a range name (non-TCRMP psx files are left alone), when
-    no years were given, or when the target name is already taken by a
-    different bundle.
+    Both halves move together: the .psx file and its sibling .files
+    directory, which Metashape addresses by the project's own stem, so a
+    bundle split across two names is unopenable. The move therefore refuses
+    outright when EITHER target half already exists (nothing is clobbered,
+    the caller records the conflict), and moves the .files directory first so
+    a failure on the smaller second move can be rolled back.
+
+    Returns the path the bundle lives at afterwards: the target on success,
+    the original path when no move was due or the move was refused. Raises
+    RuntimeError when the .psx move fails after the .files move landed - the
+    .files move is rolled back first, so the bundle is left intact.
     """
-    parts = psx_range_parts(path)
-    if parts is None or not years:
+    target = psx_range_target(path, years)
+    if target is None:
         return path
 
-    site, transect = parts[0], parts[1]
-    new_name = naming3d().psx_range_name(site, transect, years)
-    new_path = os.path.join(os.path.dirname(path), new_name)
-    if os.path.abspath(new_path) == os.path.abspath(path):
-        return path
-    if os.path.exists(new_path):
-        logging.warning(
-            f"Cannot rename {os.path.basename(path)} to {new_name}: that name is "
-            f"already taken; leaving the bundle where it is"
+    files_dir = files_dir_for(path)
+    target_files = files_dir_for(target)
+    taken = [p for p in (target, target_files) if os.path.exists(p)]
+    if taken:
+        logging.error(
+            f"Cannot rename {os.path.basename(path)} to {os.path.basename(target)}: "
+            f"{', '.join(os.path.basename(t) for t in taken)} already exists; "
+            f"leaving the bundle where it is"
         )
         return path
 
-    os.rename(path, new_path)
-    files_dir = path[:-len(".psx")] + ".files"
+    moved_files_dir = False
     if os.path.isdir(files_dir):
-        os.rename(files_dir, new_path[:-len(".psx")] + ".files")
-    logging.info(f"Renamed psx {os.path.basename(path)} to {new_name}")
-    return new_path
+        os.rename(files_dir, target_files)
+        moved_files_dir = True
+    try:
+        os.rename(path, target)
+    except OSError as exc:
+        if moved_files_dir:
+            try:
+                os.rename(target_files, files_dir)
+            except OSError as rollback_exc:
+                raise RuntimeError(
+                    f"Could not rename {path} to {target} ({exc}), and rolling the "
+                    f"project data back from {target_files} to {files_dir} also failed "
+                    f"({rollback_exc}). The bundle is split across two names and must "
+                    f"be repaired by hand before this timepoint is rerun."
+                ) from exc
+        raise RuntimeError(
+            f"Could not rename {path} to {target} ({exc}); the project data was moved "
+            f"back to {files_dir} and the bundle is unchanged."
+        ) from exc
+    logging.info(f"Renamed psx {os.path.basename(path)} to {os.path.basename(target)}")
+    return target
 
 
 def years_in_psx(doc):
     """Sorted unique years of the timepoints a document holds, read from its
-    chunk labels (readable ids). Labels that are not readable ids - a
-    hand-added "Chunk 1", a non-TCRMP file stem - are ignored, and so is a
-    whole document when the shared naming library is not reachable: a
-    non-TCRMP run never needs it and must not fail on it."""
+    chunk labels (readable ids). Only chunks that actually hold a model
+    count: a chunk whose reconstruction failed is still in the document, and
+    letting it widen the range would name the bundle after a year it does
+    not contain. Labels that are not readable ids - a hand-added "Chunk 1",
+    a non-TCRMP file stem - are ignored, and so is a whole document when the
+    shared naming library is not reachable: a non-TCRMP run never needs it
+    and must not fail on it."""
     try:
         naming = naming3d()
     except ImportError as exc:
@@ -249,6 +301,8 @@ def years_in_psx(doc):
         return []
     years = set()
     for chunk in getattr(doc, "chunks", []):
+        if getattr(chunk, "model", None) is None:
+            continue
         try:
             years.add(naming.id_parts(chunk.label)["year"])
         except (ValueError, AttributeError, TypeError):
@@ -345,6 +399,20 @@ def now_stamp():
 # --- registry write-back ----------------------------------------------------
 
 
+def status_note(transect_id, text):
+    """The status.csv Notes cell for a row with `text` appended rather than
+    substituted, so recording a failure does not erase what an earlier step
+    wrote there. Idempotent (a note already present is not repeated) and
+    capped, so repeated reruns cannot grow the cell without bound."""
+    existing = (get_transect_status(transect_id).get("Notes") or "").strip()
+    if not existing:
+        return text
+    if text in existing:
+        return existing
+    combined = f"{existing}; {text}"
+    return combined[-NOTE_MAX_CHARS:] if len(combined) > NOTE_MAX_CHARS else combined
+
+
 def registry_note(transect_id, text):
     """Append a note to the registry row without discarding what the operator
     wrote there (notes is an operator-owned column). Idempotent: a note
@@ -382,27 +450,41 @@ def registry_success(transect_id, facts, psx_path):
         "texture_pages": facts["texture_pages"],
         "dem_mm_per_pix": facts["dem_mm_per_pix"],
         "psx_file": psx_path,
-        "processing_size_gb": registry().tally_size_gb(project_dir),
         "params_summary": facts["params_summary"],
     }
     numbers.update(registry_scale_fields(
         facts["scale_status"], facts["scale_error_m"], facts["scale_bars"]))
+
+    # Walking the folder is the one part of this that touches the whole tree,
+    # so a failure there records the size as unknown rather than costing the
+    # timepoint every other number it earned.
+    try:
+        numbers["processing_size_gb"] = registry().tally_size_gb(project_dir)
+        numbers["sizes_verified"] = now_stamp()
+    except Exception as exc:
+        logging.warning(f"Could not tally the processing folder for {transect_id}: {exc}")
+
     registry_client.update(
         transect_id,
         step1_status="complete",
         step1_finished=facts["end_time"],
         manual_edit_status="awaiting",
-        sizes_verified=now_stamp(),
         stage="done",
         **numbers,
     )
-    registry_client.snapshot(
-        transect_id,
-        project_dir,
-        dict(numbers),
-        report_pdf=facts.get("report_file") or None,
-        params_yaml=os.path.join(project_dir, "analysis_params.yaml"),
-    )
+
+    # The snapshot is a copy of facts already written above, so a failure
+    # here is logged and the row still stands.
+    try:
+        registry_client.snapshot(
+            transect_id,
+            project_dir,
+            dict(numbers),
+            report_pdf=facts.get("report_file") or None,
+            params_yaml=os.path.join(project_dir, "analysis_params.yaml"),
+        )
+    except Exception as exc:
+        logging.warning(f"Could not capture the registry snapshot for {transect_id}: {exc}")
 
 
 # --- run guards -------------------------------------------------------------
@@ -439,7 +521,7 @@ def acquire_project_lock(step_name):
     """Take an exclusive flock on <project>/.processing.lock.
 
     Refuses to start if another step is already running for this project.
-    Caller must keep the returned file object alive — closing it releases
+    Caller must keep the returned file object alive: closing it releases
     the lock. Stamps the file with PID, step name, hostname, and start time
     so the holder is visible if a future run is blocked.
     """
@@ -477,7 +559,7 @@ def check_temp_free_space(min_gb=None):
 
     Metashape's depth_maps_pyramids intermediates land in TMPDIR. Running
     out of space mid-build leaves a half-saved PSX (the original 2026-05
-    incident). This is a coarse preflight only — it does not guarantee
+    incident). This is a coarse preflight only, and does not guarantee
     enough space for the full run, just that we are not starting empty.
     """
     if min_gb is None:
@@ -991,7 +1073,7 @@ def process_transect(transect_id, chunk, doc, psx_path):
         processing_time = (end_time - start_time).total_seconds()
 
         # Record the build-time facts now, but DO NOT mark Step 1 complete
-        # here — that flag flips only after the PSX save is verified on disk
+        # here: that flag flips only after the PSX save is verified on disk
         # (see process_model). The 2026-05 FLC T6 incident wrote complete=True
         # before doc.save() landed, leaving an unrecoverable orphan chunk.
         tracking_data = {
@@ -1009,6 +1091,11 @@ def process_transect(transect_id, chunk, doc, psx_path):
         logging.info(f"Successfully processed model {transect_id} in {processing_time:.1f} seconds")
         Metashape.app.update()  # Added update after model build
         return {
+            # started_at stays a datetime: process_model restamps end_time
+            # and seconds once the save, the verification and the psx rename
+            # are done, so the registry carries the timepoint's wall time
+            # rather than the reconstruction time alone.
+            "started_at": start_time,
             "start_time": start_time.strftime("%Y-%m-%d %H:%M:%S"),
             "end_time": end_time.strftime("%Y-%m-%d %H:%M:%S"),
             "seconds": round(processing_time, 1),
@@ -1034,7 +1121,7 @@ def process_transect(transect_id, chunk, doc, psx_path):
             "Status": "Error in Step 1",
             "Step 1 complete": "False",
             "Step 1 error time": error_time,
-            "Notes": error_msg
+            "Notes": status_note(transect_id, error_msg),
         })
         registry_failure(transect_id, error_msg)
         return None
@@ -1103,6 +1190,13 @@ def process_model(transect_ids, psx_path):
 
     # Results tracking
     results = {}
+
+    # Bound to Metashape objects inside the loop and cleared before the
+    # document is released: a live chunk (or the stale-chunk list) keeps the
+    # Document alive through the collector, and a Document that is still
+    # open must not be renamed on disk.
+    chunk = None
+    stale_chunks = None
 
     for i, transect_id in enumerate(transect_ids):
         # Pause boundary: stop before starting a new model. Prior models
@@ -1188,7 +1282,7 @@ def process_model(transect_ids, psx_path):
                     "Status": "Step 1 save verification failed",
                     "Step 1 complete": "False",
                     "Step 1 error time": error_time,
-                    "Notes": note,
+                    "Notes": status_note(transect_id, note),
                 })
                 registry_failure(transect_id, note)
                 logging.error(
@@ -1213,26 +1307,90 @@ def process_model(transect_ids, psx_path):
     chunk_labels = [c.label for c in doc.chunks]
     years = years_in_psx(doc)
 
-    # Important: clear the document reference to fully release the bundle
-    # before it is renamed on disk.
+    # Clear EVERY reference to the document before the bundle is renamed on
+    # disk: chunk and stale_chunks are Metashape objects that own the
+    # Document, so dropping doc alone would not release it.
+    chunk = None
+    stale_chunks = None
     doc = None
-    import gc
     gc.collect()
 
-    final_psx_path = rename_psx_range(psx_path, years)
-    if final_psx_path != psx_path:
-        for label in chunk_labels:
-            if not get_transect_status(label):
-                continue
-            update_tracking(label, {"PSX file": final_psx_path})
-            registry_client.update(label, psx_file=final_psx_path)
-        manifest.append_event(PROJECT_NAME, ", ".join(chunk_labels), "psx", "renamed",
-                              final_psx_path, details=f"was {os.path.basename(psx_path)}")
+    # Finalization: rename the bundle to the range it now covers, then write
+    # the run's numbers back to the registry. The reconstruction above is
+    # already saved and verified on disk, so nothing here may take the run
+    # down: a failure is recorded against the timepoint and the caller's
+    # completeness sweep still runs.
+    final_psx_path = psx_path
+    try:
+        rename_target = psx_range_target(psx_path, years)
+        final_psx_path = rename_psx_range(psx_path, years)
 
-    for transect_id, facts in results.items():
-        registry_success(transect_id, facts, final_psx_path)
+        if rename_target is not None and final_psx_path == psx_path:
+            # The rename was refused (a name collision). The bundle keeps its
+            # current name, so that is what the registry must record.
+            conflict = (
+                f"psx name conflict: {os.path.basename(psx_path)} could not become "
+                f"{os.path.basename(rename_target)}"
+            )
+            logging.error(conflict)
+            for transect_id in results:
+                registry_note(transect_id, conflict)
+
+        if final_psx_path != psx_path:
+            for label in chunk_labels:
+                if not get_transect_status(label):
+                    continue
+                update_tracking(label, {"PSX file": final_psx_path})
+                registry_client.update(label, psx_file=final_psx_path)
+            manifest.append_event(PROJECT_NAME, ", ".join(chunk_labels), "psx", "renamed",
+                                  final_psx_path, details=f"was {os.path.basename(psx_path)}")
+
+        # Wall time for the timepoint, measured here so the atlas sees the
+        # save, the verification and the rename, not the reconstruction alone.
+        finished = datetime.datetime.now()
+        for transect_id, facts in results.items():
+            facts["end_time"] = finished.strftime("%Y-%m-%d %H:%M:%S")
+            facts["seconds"] = round((finished - facts["started_at"]).total_seconds(), 1)
+            registry_success(transect_id, facts, final_psx_path)
+
+    except Exception as exc:
+        logging.error(
+            f"Step 1 finalization failed for {os.path.basename(psx_path)}: {exc}")
+        traceback.print_exc()
+        for transect_id in results:
+            try:
+                registry_failure(
+                    transect_id,
+                    f"reconstruction completed and verified on disk, but step 1 "
+                    f"finalization (psx rename or registry write-back) failed: {exc}",
+                )
+            except Exception as note_exc:
+                logging.error(
+                    f"Could not record the finalization failure for {transect_id}: {note_exc}")
 
     return final_psx_path, results
+
+
+def preferred_psx(site, transect, readable_id=None):
+    """The psx the registry already associates with this site and transect.
+
+    This timepoint's own row comes first, so a forced rerun goes back into
+    the bundle its chunk already lives in and the stale-chunk swap can
+    replace it; otherwise the most recent sibling row's psx_file wins. Only
+    a path that is still on disk is offered. It outranks a scan of
+    range-named files in current_psx, so a bundle the name scan cannot
+    reconstruct (a numbered collision sibling, a bundle whose rename was
+    refused) is still the one appended to. None outside TCRMP mode.
+    """
+    rows = registry_client.rows_for(site=site, transect=transect) or []
+    ordered = list(reversed(rows))
+    if readable_id:
+        ordered.sort(key=lambda r: 0 if r.get("readable_id") == readable_id else 1)
+    for row in ordered:
+        candidate = (row.get("psx_file") or "").strip()
+        if candidate and os.path.exists(candidate):
+            return candidate
+    return None
 
 
 def frame_model_dirs():
@@ -1347,6 +1505,7 @@ def main():
             psx_path, is_new = current_psx(
                 project_dir, parts["site"], parts["transect"], parts["year"],
                 MAX_CHUNKS_PER_PSX, count_chunks_in_psx,
+                preferred=preferred_psx(parts["site"], parts["transect"], transect_id),
             )
             logging.info(
                 f"{transect_id}: {'starting' if is_new else 'appending to'} "
@@ -1386,7 +1545,7 @@ def main():
             update_tracking(transect_id, {
                 "Status": "Step 1 sweep failed",
                 "Step 1 complete": "False",
-                "Notes": note,
+                "Notes": status_note(transect_id, note),
             })
             registry_failure(transect_id, note)
     if sweep_failures:

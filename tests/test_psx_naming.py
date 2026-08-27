@@ -16,6 +16,7 @@ import sys
 import tempfile
 import types
 import unittest
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
@@ -91,13 +92,18 @@ def touch_psx(project_dir, name):
 
 
 class FakeChunk:
-    def __init__(self, label):
+    """A document chunk as the naming helpers see it: a label and whether a
+    model was actually built."""
+
+    def __init__(self, label, model="mesh"):
         self.label = label
+        self.model = model
 
 
 class FakeDoc:
     def __init__(self, labels):
-        self.chunks = [FakeChunk(label) for label in labels]
+        self.chunks = [FakeChunk(*label) if isinstance(label, tuple) else FakeChunk(label)
+                       for label in labels]
 
 
 class PsxHelperTestCase(unittest.TestCase):
@@ -197,6 +203,36 @@ class CurrentPsxTests(PsxHelperTestCase):
         self.assertEqual(path, os.path.join(self.tmp, "MRS_T1_2024_2024_2.psx"))
         self.assertTrue(is_new)
 
+    def test_registry_preferred_wins_over_newest_range(self):
+        # A numbered collision sibling is invisible to the range scan, so
+        # only the registry can point at it. Under the cap, it wins.
+        touch_psx(self.tmp, "MRS_T1_2022_2024.psx")
+        preferred = touch_psx(self.tmp, "MRS_T1_2024_2024_2.psx")
+        path, is_new = self.step1.current_psx(
+            self.tmp, "MRS", "T1", 2025, 4,
+            self.counter({"MRS_T1_2022_2024.psx": 1, "MRS_T1_2024_2024_2.psx": 2}),
+            preferred=preferred)
+        self.assertEqual(path, preferred)
+        self.assertFalse(is_new)
+        self.assertEqual(self.seen, ["MRS_T1_2024_2024_2.psx"])  # the range scan never ran
+
+    def test_preferred_at_the_cap_falls_back_to_the_range_scan(self):
+        newest = touch_psx(self.tmp, "MRS_T1_2022_2024.psx")
+        preferred = touch_psx(self.tmp, "MRS_T1_2024_2024_2.psx")
+        path, is_new = self.step1.current_psx(
+            self.tmp, "MRS", "T1", 2025, 4,
+            self.counter({"MRS_T1_2022_2024.psx": 1, "MRS_T1_2024_2024_2.psx": 4}),
+            preferred=preferred)
+        self.assertEqual(path, newest)
+        self.assertFalse(is_new)
+
+    def test_preferred_that_is_gone_from_disk_is_ignored(self):
+        path, is_new = self.step1.current_psx(
+            self.tmp, "MRS", "T1", 2023, 4, self.counter({}),
+            preferred=os.path.join(self.tmp, "MRS_T1_2019_2019.psx"))
+        self.assertEqual(path, os.path.join(self.tmp, "MRS_T1_2023_2023.psx"))
+        self.assertTrue(is_new)
+
     def test_unopenable_psx_counts_as_empty_and_is_reused(self):
         # count_chunks returns 0 for a bundle it cannot open; the run reuses
         # the path so process_model's quarantine path handles it.
@@ -241,6 +277,44 @@ class RenamePsxRangeTests(PsxHelperTestCase):
         self.assertEqual(self.step1.rename_psx_range(path, [2023, 2024]), path)
         self.assertTrue(os.path.isfile(path))
 
+    def test_refuses_when_only_the_target_files_dir_exists(self):
+        # Half a bundle at the target name is worse than none: moving onto it
+        # would leave two psx files sharing one .files directory.
+        path = touch_psx(self.tmp, "MRS_T1_2023_2023.psx")
+        os.makedirs(os.path.join(self.tmp, "MRS_T1_2023_2024.files"))
+        self.assertEqual(self.step1.rename_psx_range(path, [2023, 2024]), path)
+        self.assertTrue(os.path.isfile(path))
+        self.assertTrue(os.path.isdir(os.path.join(self.tmp, "MRS_T1_2023_2023.files")))
+
+    def test_refuses_when_the_target_name_is_a_directory(self):
+        path = touch_psx(self.tmp, "MRS_T1_2023_2023.psx")
+        os.makedirs(os.path.join(self.tmp, "MRS_T1_2023_2024.psx"))
+        self.assertEqual(self.step1.rename_psx_range(path, [2023, 2024]), path)
+        self.assertTrue(os.path.isfile(path))
+        self.assertTrue(os.path.isdir(os.path.join(self.tmp, "MRS_T1_2023_2023.files")))
+
+    def test_rolls_the_files_dir_back_when_the_psx_move_fails(self):
+        # The .files directory moves first, so a failure on the .psx move has
+        # to put it back or the bundle is split across two names.
+        path = touch_psx(self.tmp, "MRS_T1_2023_2023.psx")
+        real_rename = os.rename
+
+        def flaky_rename(src, dst):
+            if str(src).endswith(".psx"):
+                raise OSError("simulated psx move failure")
+            return real_rename(src, dst)
+
+        with mock.patch("os.rename", new=flaky_rename):
+            with self.assertRaises(RuntimeError):
+                self.step1.rename_psx_range(path, [2023, 2024])
+
+        self.assertTrue(os.path.isfile(path))
+        self.assertTrue(os.path.isdir(os.path.join(self.tmp, "MRS_T1_2023_2023.files")))
+        self.assertTrue(os.path.isfile(
+            os.path.join(self.tmp, "MRS_T1_2023_2023.files", "project.zip")))
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, "MRS_T1_2023_2024.files")))
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, "MRS_T1_2023_2024.psx")))
+
     def test_missing_files_dir_is_tolerated(self):
         path = os.path.join(self.tmp, "MRS_T1_2023_2023.psx")
         with open(path, "w") as fh:
@@ -258,6 +332,12 @@ class YearsInPsxTests(PsxHelperTestCase):
     def test_unparseable_labels_ignored(self):
         doc = FakeDoc(["Chunk 1", "GOPR0001", "MRS_T1_2025_pbl", ""])
         self.assertEqual(self.step1.years_in_psx(doc), [2025])
+
+    def test_chunks_without_a_model_are_ignored(self):
+        # A chunk whose reconstruction failed is still in the document; it
+        # must not widen the range to a year the bundle does not hold.
+        doc = FakeDoc([("MRS_T1_2023ann", "mesh"), ("MRS_T1_2024_pbl", None)])
+        self.assertEqual(self.step1.years_in_psx(doc), [2023])
 
     def test_empty_document(self):
         self.assertEqual(self.step1.years_in_psx(FakeDoc([])), [])
