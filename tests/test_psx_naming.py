@@ -263,6 +263,43 @@ class YearsInPsxTests(PsxHelperTestCase):
         self.assertEqual(self.step1.years_in_psx(FakeDoc([])), [])
 
 
+class RegistryScaleFieldsTests(PsxHelperTestCase):
+    """The registry cells a scaling attempt produces. The sentinel error is a
+    "no measurement" marker, not a 999 km bar, so it reaches the registry as
+    blank cells; status.csv keeps the sentinel itself."""
+
+    def test_pass_carries_the_numbers(self):
+        self.assertEqual(
+            self.step1.registry_scale_fields("PASS", 0.0014, 2, bar_length_m=0.75),
+            {"scale_status": "PASS", "scale_error_mm": 1.4,
+             "scale_error_ppm": 1867, "scale_bars": 2})
+
+    def test_manual_needed_with_a_real_error_carries_the_numbers(self):
+        self.assertEqual(
+            self.step1.registry_scale_fields("MANUAL_NEEDED", 0.05, 2, bar_length_m=0.75),
+            {"scale_status": "MANUAL_NEEDED", "scale_error_mm": 50.0,
+             "scale_error_ppm": 66667, "scale_bars": 2})
+
+    def test_sentinel_error_blanks_the_error_cells(self):
+        self.assertEqual(
+            self.step1.registry_scale_fields(
+                "MANUAL_NEEDED", self.step1.scale_utils.SENTINEL_ERROR, 0, bar_length_m=0.75),
+            {"scale_status": "MANUAL_NEEDED", "scale_error_mm": "",
+             "scale_error_ppm": "", "scale_bars": 0})
+
+    def test_missing_error_blanks_the_error_cells(self):
+        fields = self.step1.registry_scale_fields("MANUAL_NEEDED", None, 0, bar_length_m=0.75)
+        self.assertEqual(fields["scale_error_mm"], "")
+        self.assertEqual(fields["scale_error_ppm"], "")
+
+    def test_bar_length_defaults_to_the_configured_bars(self):
+        # The minimal parameter set above declares one 0.75 m bar.
+        self.assertEqual(
+            self.step1.registry_scale_fields("PASS", 0.0014, 2),
+            {"scale_status": "PASS", "scale_error_mm": 1.4,
+             "scale_error_ppm": 1867, "scale_bars": 2})
+
+
 class PsxRangePartsTests(PsxHelperTestCase):
     def test_parses_a_range_name(self):
         self.assertEqual(

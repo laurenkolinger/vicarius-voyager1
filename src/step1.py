@@ -305,6 +305,31 @@ def mean_bar_length(model_cfg):
     return sum(lengths) / len(lengths) if lengths else 0.0
 
 
+def registry_scale_fields(status, error_m, bars, bar_length_m=None):
+    """The four registry cells a scaling attempt produces.
+
+    SENTINEL_ERROR is a "nothing was measured" marker, not a 999 metre bar,
+    so it reaches the registry as blank error cells rather than 999000 mm and
+    a nine-digit ppm that would sort and chart as a real reading. The status
+    and the bar count are always written: MANUAL_NEEDED with no bars is the
+    fact the atlas needs. status.csv keeps the sentinel itself, so the
+    operator still sees what the scaling pass returned.
+
+    bar_length_m defaults to the mean declared bar length in the loaded
+    parameters (the ppm denominator).
+    """
+    if bar_length_m is None:
+        bar_length_m = mean_bar_length(
+            PARAMS.get("processing", {}).get("model_processing", {}) or {})
+    measured = error_m is not None and float(error_m) < scale_utils.SENTINEL_ERROR
+    return {
+        "scale_status": status,
+        "scale_error_mm": round(float(error_m) * 1000, 2) if measured else "",
+        "scale_error_ppm": scale_utils.ppm(error_m, bar_length_m) if measured else "",
+        "scale_bars": bars,
+    }
+
+
 def print_boxed(message):
     """Print one message inside a box so it survives a long console scroll."""
     rule = "+" + "-" * (len(message) + 2) + "+"
@@ -351,10 +376,6 @@ def registry_success(transect_id, facts, psx_path):
     project_dir = DIRECTORIES["base"]
     numbers = {
         "step1_seconds": facts["seconds"],
-        "scale_status": facts["scale_status"],
-        "scale_error_mm": facts["scale_error_mm"],
-        "scale_error_ppm": facts["scale_error_ppm"],
-        "scale_bars": facts["scale_bars"],
         "tie_points": facts["tie_points"],
         "faces_full": facts["faces_full"],
         "faces_delivery": facts["faces_delivery"],
@@ -364,6 +385,8 @@ def registry_success(transect_id, facts, psx_path):
         "processing_size_gb": registry().tally_size_gb(project_dir),
         "params_summary": facts["params_summary"],
     }
+    numbers.update(registry_scale_fields(
+        facts["scale_status"], facts["scale_error_m"], facts["scale_bars"]))
     registry_client.update(
         transect_id,
         step1_status="complete",
@@ -991,7 +1014,6 @@ def process_transect(transect_id, chunk, doc, psx_path):
             "seconds": round(processing_time, 1),
             "scale_status": scale_status,
             "scale_error_m": scale_error,
-            "scale_error_mm": round(scale_error * 1000, 2),
             "scale_error_ppm": scale_ppm,
             "scale_bars": scale_bars,
             "tie_points": tie_points,
