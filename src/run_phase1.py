@@ -18,13 +18,21 @@ Two modes:
   are the original file name without extension - no multi-part merging, no
   naming-pattern validation.
 
+Parameter overrides arrive as repeatable `--param dotted.path=value` and are
+written into the project's analysis_params.yaml before step 0 runs (TCRMP:
+right after the processing folder is prepared; plain: right after project
+setup). That is how the VICARIUS UI form reaches a TCRMP run, whose
+processing folder does not exist yet at launch time.
+
 Usage:
     python src/run_phase1.py                          # TCRMP, every pending timepoint
     python src/run_phase1.py --site MRS --transect T1  # TCRMP, one site/transect
+    python src/run_phase1.py --param processing.frames_per_transect=300
     python src/run_phase1.py --no-tcrmp --input /path/to/input --project /path/to/project
 """
 
 import argparse
+import json
 import logging
 import os
 import re
@@ -108,28 +116,197 @@ def _naming3d():
     return naming3d
 
 
-_PROCESSING_HEADER_RE = re.compile(r"^(processing:\s*\n)", re.MULTILINE)
+# ---------------------------------------------------------------------------
+# Section-aware analysis_params.yaml editing
+# ---------------------------------------------------------------------------
+# A targeted text edit, not a YAML load/dump round trip, so the comments in
+# the human-editable file (the one `open_params_for_editing` hands the user in
+# vim) survive untouched, along with key order and every key nobody asked to
+# change. Every lookup is scoped to the block its parent key opens, so
+# processing.metashape.defaults.smooth_strength and
+# processing.step1_products.smooth_strength are different keys and setting one
+# never touches the other.
+
+_NUMBER_RE = re.compile(r"^-?\d+(\.\d+)?([eE][+-]?\d+)?$")
 
 
-def _set_processing_scalar(params_path: Path, key: str, value: str) -> None:
-    """Set processing.<key>: <value> in a project's analysis_params.yaml in
-    place, preserving every comment and every other key - a targeted text
-    edit, not a YAML load/dump round-trip, so the human-editable template
-    (the one `open_params_for_editing` hands the user in vim) survives
-    untouched. Inserts right after the top-level `processing:` line when the
-    key is not already present under it; replaces the value in place when it
-    is. `value` must already be a valid YAML scalar (quote strings with
-    json.dumps() before calling).
+def yaml_scalar(value) -> str:
+    """The YAML literal for a value that arrived as a command-line string.
+
+    true/false and plain numbers are written bare, so config.py reads them
+    back as booleans and numbers rather than strings. Everything else is
+    JSON-quoted, so a path with a space, a colon or a "#" cannot break the
+    file it is written into.
     """
-    text = params_path.read_text()
-    key_re = re.compile(rf"^(\s*){re.escape(key)}:\s*\S.*$", re.MULTILINE)
-    if key_re.search(text):
-        text = key_re.sub(lambda m: f"{m.group(1)}{key}: {value}", text, count=1)
-    elif _PROCESSING_HEADER_RE.search(text):
-        text = _PROCESSING_HEADER_RE.sub(lambda m: f"{m.group(1)}  {key}: {value}\n", text, count=1)
-    else:
-        text += f"\nprocessing:\n  {key}: {value}\n"
-    params_path.write_text(text)
+    text = str(value).strip()
+    if text.lower() in ("true", "false"):
+        return text.lower()
+    if _NUMBER_RE.match(text):
+        return text
+    return json.dumps(text)
+
+
+def _significant(line: str) -> bool:
+    """False for a blank line or a whole-line comment: either can sit at any
+    indent, so neither may be mistaken for a key when bounding a block."""
+    stripped = line.strip()
+    return bool(stripped) and not stripped.startswith("#")
+
+
+def _indent_of(line: str) -> int:
+    return len(line) - len(line.lstrip(" "))
+
+
+def _split_trailing_comment(value_text: str):
+    """(value, comment) for the text after "key:" on one line. A "#" inside a
+    quoted scalar is part of the value, not the start of a comment."""
+    quote = None
+    for i, ch in enumerate(value_text):
+        if quote:
+            if ch == quote:
+                quote = None
+            continue
+        if ch in "\"'":
+            quote = ch
+            continue
+        if ch == "#" and (i == 0 or value_text[i - 1] in " \t"):
+            return value_text[:i], value_text[i:]
+    return value_text, ""
+
+
+def _find_key(lines, start: int, end: int, key: str):
+    """(index, indent) of the line opening `key` at the top level of the block
+    spanning [start, end), or (None, None). The block's top level is its
+    shallowest significant indent, so a nested key of the same name deeper in
+    the block is never matched."""
+    base = None
+    for i in range(start, end):
+        if not _significant(lines[i]):
+            continue
+        indent = _indent_of(lines[i])
+        if base is None or indent < base:
+            base = indent
+    if base is None:
+        return None, None
+    opener = re.compile(rf"^\s*{re.escape(key)}\s*:(\s|$)")
+    for i in range(start, end):
+        if not _significant(lines[i]):
+            continue
+        if _indent_of(lines[i]) != base:
+            continue
+        if opener.match(lines[i]):
+            return i, base
+    return None, None
+
+
+def _block_end(lines, key_index: int, indent: int, end: int) -> int:
+    """End (exclusive) of the block the key at `key_index` owns."""
+    for i in range(key_index + 1, end):
+        if not _significant(lines[i]):
+            continue
+        if _indent_of(lines[i]) <= indent:
+            return i
+    return end
+
+
+def set_yaml_path(text: str, dotted_path: str, value: str) -> str:
+    """Return `text` with `dotted_path` set to `value`.
+
+    `value` must already be a valid YAML scalar (see yaml_scalar). A key that
+    is missing is created, together with any missing parents, at the top of
+    its parent's block; a key that exists has its value replaced in place,
+    keeping its trailing comment.
+    """
+    lines = text.split("\n")
+    parts = [p for p in dotted_path.split(".") if p]
+    if not parts:
+        raise ValueError(f"empty parameter path: {dotted_path!r}")
+
+    start, end, parent_indent = 0, len(lines), -1
+    for depth, key in enumerate(parts):
+        index, key_indent = _find_key(lines, start, end, key)
+
+        if index is None:
+            child_indent = parent_indent + 2 if parent_indent >= 0 else 0
+            created = []
+            indent = child_indent
+            for missing in parts[depth:-1]:
+                created.append(" " * indent + missing + ":")
+                indent += 2
+            created.append(" " * indent + parts[-1] + ": " + value)
+            if parent_indent < 0:
+                # A missing top-level section goes at the end of the document,
+                # after the sections that are already there.
+                while lines and not lines[-1].strip():
+                    lines.pop()
+                lines.extend([""] + created + [""])
+            else:
+                lines[start:start] = created
+            return "\n".join(lines)
+
+        if depth == len(parts) - 1:
+            head, _, tail = lines[index].partition(":")
+            _, comment = _split_trailing_comment(tail)
+            replaced = f"{' ' * key_indent}{key}: {value}"
+            if comment.strip():
+                replaced += " " + comment.strip()
+            lines[index] = replaced
+            return "\n".join(lines)
+
+        parent_indent = key_indent
+        start = index + 1
+        end = _block_end(lines, index, key_indent, end)
+
+    return "\n".join(lines)
+
+
+def set_params_path(params_path: Path, dotted_path: str, value: str) -> None:
+    """Apply set_yaml_path to a project's analysis_params.yaml on disk."""
+    params_path.write_text(set_yaml_path(params_path.read_text(), dotted_path, value))
+
+
+def parse_param_pairs(pairs):
+    """[(dotted_path, yaml scalar)] from repeatable --param dotted.path=value."""
+    parsed = []
+    for pair in pairs or []:
+        if "=" not in pair:
+            raise ValueError(f"--param must be dotted.path=value, got: {pair!r}")
+        key, _, raw = pair.partition("=")
+        key = key.strip()
+        if not key:
+            raise ValueError(f"--param has an empty key: {pair!r}")
+        parsed.append((key, yaml_scalar(raw)))
+    return parsed
+
+
+def apply_param_overrides(project_dir: Path, pairs) -> None:
+    """Write every --param override into this project's analysis_params.yaml.
+
+    This is how the VICARIUS UI form reaches a TCRMP run: the processing
+    folder is minted mid-run from the module template, so the runner cannot
+    edit a file that does not exist yet at launch and sends the values on the
+    command line instead.
+    """
+    if not pairs:
+        return
+    params_path = Path(project_dir) / "analysis_params.yaml"
+    for dotted_path, value in pairs:
+        set_params_path(params_path, dotted_path, value)
+        print(f"    Set {dotted_path}: {value} in {params_path.name}")
+
+
+def _set_force_rerun(project_dir: Path, on: bool) -> None:
+    """Record whether step 1 is running under --force, in the one file step 1
+    reads. step1's stale-chunk swap consults it before removing a chunk from a
+    timepoint the registry records as manually edited, so the operator's
+    straightening and cropping is only rebuilt when the rebuild was asked for.
+    Set right before step 1 launches and cleared right after, so the flag can
+    never outlive the run that set it.
+    """
+    params_path = Path(project_dir) / "analysis_params.yaml"
+    if not params_path.exists():
+        return
+    set_params_path(params_path, "processing.force_rerun", "true" if on else "false")
 
 
 def detect_metashape() -> str:
@@ -395,7 +572,7 @@ def prepare_tcrmp_folder(row: dict) -> Path:
     if not params_dst.exists():
         shutil.copy2(str(TEMPLATE_PARAMS), str(params_dst))
         print(f"    Copied analysis_params.yaml to {project_dir}")
-    _set_processing_scalar(params_dst, "tcrmp", "true")
+    set_params_path(params_dst, "processing.tcrmp", "true")
 
     registry_client.update(
         readable_id,
@@ -521,6 +698,7 @@ def run_tcrmp_mode(args, metashape_path: str) -> None:
             readable_id = row["readable_id"]
             banner(f"TIMEPOINT: {readable_id}")
             project_dir = prepare_tcrmp_folder(row)
+            apply_param_overrides(project_dir, getattr(args, "param_pairs", None))
             print(f"  Processing folder: {project_dir}")
             _link_output(vicarius_run_dir, readable_id, project_dir)
 
@@ -535,7 +713,11 @@ def run_tcrmp_mode(args, metashape_path: str) -> None:
                 # too or the forced rerun would do nothing.
                 status_rows.reset_step1(project_dir, readable_id)
                 print(f"  --force: cleared the step 1 verdict for {readable_id} in status.csv")
-            run_step1(project_dir, metashape_path)
+            _set_force_rerun(project_dir, bool(getattr(args, "force", False)))
+            try:
+                run_step1(project_dir, metashape_path)
+            finally:
+                _set_force_rerun(project_dir, False)
             print_manual_instructions(project_dir)
             processed_dirs.append(project_dir)
 
@@ -688,7 +870,7 @@ def setup_project(project_dir: Path, input_path: Path, input_type: str, ids: dic
         print(f"  Copied analysis_params.yaml to {project_dir}")
     else:
         print("  analysis_params.yaml already exists, keeping existing.")
-    _set_processing_scalar(params_dst, "tcrmp", "false")
+    set_params_path(params_dst, "processing.tcrmp", "false")
 
     if input_type == "frames":
         frames_dir = project_dir / "frames"
@@ -702,9 +884,7 @@ def setup_project(project_dir: Path, input_path: Path, input_type: str, ids: dic
             print(f"    Linking {name}/...")
             os.symlink(str(src.resolve()), str(dst))
     else:
-        import json
-
-        _set_processing_scalar(params_dst, "video_input_dir", json.dumps(str(input_path)))
+        set_params_path(params_dst, "processing.video_input_dir", json.dumps(str(input_path)))
         print(f"  Videos will be read in place from {input_path} (no copy, no link).")
 
     print("  Project setup complete.")
@@ -785,6 +965,7 @@ def run_non_tcrmp_mode(args, metashape_path: str) -> None:
 
     try:
         setup_project(project_dir, input_path, input_type, ids)
+        apply_param_overrides(project_dir, getattr(args, "param_pairs", None))
     except Exception as e:
         print(f"\nError during project setup: {e}")
         sys.exit(1)
@@ -802,7 +983,11 @@ def run_non_tcrmp_mode(args, metashape_path: str) -> None:
         if input_type == "video":
             run_step0(project_dir)
 
-        run_step1(project_dir, metashape_path)
+        _set_force_rerun(project_dir, bool(getattr(args, "force", False)))
+        try:
+            run_step1(project_dir, metashape_path)
+        finally:
+            _set_force_rerun(project_dir, False)
 
     except PipelinePaused as e:
         banner("PHASE 1 PAUSED")
@@ -926,7 +1111,23 @@ def main():
         help="Skip the SUMMARY confirmation prompt. Used by the VICARIUS UI "
         "to run non-interactively when all inputs come from the form.",
     )
+    parser.add_argument(
+        "--param",
+        action="append",
+        default=[],
+        metavar="DOTTED.PATH=VALUE",
+        help="Set one key in the project's analysis_params.yaml before the steps "
+        "read it, e.g. --param processing.frames_per_transect=300. Repeatable, and "
+        "section aware: processing.step1_products.smooth_strength and "
+        "processing.metashape.defaults.smooth_strength are different keys. This is "
+        "how the VICARIUS UI form reaches a TCRMP run, whose processing folder does "
+        "not exist yet at launch.",
+    )
     args = parser.parse_args()
+    try:
+        args.param_pairs = parse_param_pairs(args.param)
+    except ValueError as exc:
+        parser.error(str(exc))
 
     print("\nDetecting Metashape installation...")
     metashape_path = detect_metashape()

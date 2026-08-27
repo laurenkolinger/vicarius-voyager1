@@ -448,6 +448,37 @@ def registry_note(transect_id, text):
     registry_client.update(transect_id, notes=combined)
 
 
+def force_rerun_requested():
+    """True when run_phase1 launched this step under --force.
+
+    run_phase1 writes processing.force_rerun into the processing folder's
+    analysis_params.yaml right before step 1 starts and clears it right
+    after, so the step can tell a forced rebuild from an ordinary rerun
+    without a second channel.
+    """
+    return bool(PARAMS.get("processing", {}).get("force_rerun", False))
+
+
+MANUAL_EDIT_SKIP_NOTE = "skipped: manual edits present; use --force to rebuild"
+
+
+def stale_chunk_decision(registry_enabled, manual_edit_status, force):
+    """"replace" or "skip" for a chunk already labelled with this timepoint.
+
+    Removing a stale chunk destroys whatever straightening, cropping or hand
+    scaling the operator did at the manual gate, and nothing else on the
+    platform holds a copy of that work yet. So a timepoint the registry
+    records as manually edited is skipped rather than rebuilt, unless the
+    operator asked for the rebuild with --force. Outside TCRMP mode there is
+    no registry to consult and the original swap stands.
+    """
+    if not registry_enabled or force:
+        return "replace"
+    if (manual_edit_status or "").strip().lower() == "done":
+        return "skip"
+    return "replace"
+
+
 def registry_failure(transect_id, message):
     """Mark the timepoint failed in the registry and record why."""
     registry_client.update(transect_id, step1_status="failed", stage="failed")
@@ -1257,9 +1288,27 @@ def process_model(transect_ids, psx_path):
         # A chunk already labeled transect_id in an opened-existing document
         # is by definition incomplete or superseded (the complete case was
         # caught by the skip above); drop it before reprocessing so we
-        # don't accumulate duplicate labels in the psx.
+        # don't accumulate duplicate labels in the psx. The one exception is
+        # a timepoint the registry records as manually edited: that chunk
+        # holds work nothing else has a copy of, so it is left alone unless
+        # the operator asked for the rebuild with --force.
         stale_chunks = [c for c in doc.chunks if c.label == transect_id]
         if stale_chunks:
+            row = registry_client.row(transect_id) or {}
+            decision = stale_chunk_decision(
+                registry_client.enabled(),
+                row.get("manual_edit_status"),
+                force_rerun_requested(),
+            )
+            if decision == "skip":
+                stale_chunks = None
+                logging.warning(
+                    f"{transect_id}: the registry records manual edits as done and this "
+                    f"psx already holds a chunk with that label. Leaving it untouched."
+                )
+                print_boxed(f"{transect_id} {MANUAL_EDIT_SKIP_NOTE}")
+                registry_note(transect_id, MANUAL_EDIT_SKIP_NOTE)
+                continue
             doc.remove(stale_chunks)
             logging.info(f"Removed {len(stale_chunks)} stale chunk(s) labeled {transect_id} before reprocessing")
 
@@ -1508,7 +1557,8 @@ def main():
     transect_dirs = frame_model_dirs()
     if not transect_dirs:
         logging.error(f"No model directories found in {DIRECTORIES['frames']}")
-        return
+        print(f"ERROR: no model directories found in {DIRECTORIES['frames']}; nothing to reconstruct.")
+        sys.exit(1)
 
     # Filter for unprocessed timepoints
     unprocessed_transects = []
@@ -1599,6 +1649,21 @@ def main():
 
     logging.info("Step 1 processing complete")
     print_manual_gate(processed)
+
+    # Exit code is the only signal run_phase1 (and the VICARIUS runner behind
+    # it) reads. Reconstructing nothing that was queued is a failed run, not a
+    # quiet success with an empty manual gate; a partial run is reported and
+    # still succeeds, because the timepoints that did finish are real work.
+    queued = len(unprocessed_transects)
+    if queued and not processed:
+        logging.error(f"Step 1 completed 0 of {queued} queued model(s); nothing was reconstructed.")
+        print(f"ERROR: step 1 completed 0 of {queued} queued model(s). See the errors above.")
+        sys.exit(1)
+    if len(processed) != queued:
+        logging.warning(
+            f"Step 1 completed {len(processed)} of {queued} queued model(s); "
+            f"the rest failed or were skipped. See the messages above."
+        )
 
 
 if __name__ == "__main__":

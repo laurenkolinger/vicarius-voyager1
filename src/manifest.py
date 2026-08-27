@@ -1,4 +1,4 @@
-"""Module-central artifact manifest for 3D_init.
+"""Module-central artifact manifest for 3D_phase_1.
 
 One append-only CSV at the module root records every artifact event:
 what was made or moved, where it lives, and when. Read by the module

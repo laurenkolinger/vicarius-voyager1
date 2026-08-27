@@ -1,4 +1,4 @@
-"""Capped gradual-selection scheme for 3D_init Step 1 (A/B alternative).
+"""Capped gradual-selection scheme for 3D_phase_1 Step 1 (A/B alternative).
 
 Iterative cull-and-reoptimize of the sparse tie point cloud in the order
 ReconstructionUncertainty, ProjectionAccuracy, ReprojectionError, re-running

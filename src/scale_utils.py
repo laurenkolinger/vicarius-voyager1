@@ -1,6 +1,6 @@
-"""Automatic scaling and texture sizing for 3D_init Step 1.
+"""Automatic scaling and texture sizing for 3D_phase_1 Step 1.
 
-Scaling ported from 3D_phase2 src/step2.py: detect circular coded targets,
+Scaling carried forward from the retired phase 2 step: detect circular coded targets,
 prune markers not named in the declared scale bars, build the bars, apply
 the transform, report mean absolute scale-bar error in metres. Metashape is
 passed in so tests can inject a fake.

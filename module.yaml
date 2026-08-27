@@ -186,6 +186,15 @@ cli:
     purpose_flag: "--purpose"
     yes_flag: "--yes"
     skip_vim_flag: "--skip-vim"
+    # param_flag carries the params_writethrough values on the command line
+    # when the launch has no project directory to write into (the TCRMP case:
+    # each timepoint's processing folder is minted mid-run next to its own
+    # video). The runner emits one `--param <analysis_path>=<value>` pair per
+    # parameter below that carries an `analysis_path` and has a value, and
+    # run_phase1.py applies each into the folder's analysis_params.yaml before
+    # step 0 reads it. Without this key the runner sends no such pairs, so a
+    # module whose script does not take the flag never sees one.
+    param_flag: "--param"
     # Beyond the five keys above, the runner forwards every remaining
     # `<name>_flag` entry generically: it looks up the matching parameter in
     # `parameters:` above by name, reads the submitted (or default) value,

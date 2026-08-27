@@ -23,6 +23,11 @@ requirement (src/videos.py's group_parts(tcrmp=False)).
 
 Identity (original_videos, readable_id) is logged to status.csv, the
 registry (TCRMP; no-op otherwise), and the console before any ffmpeg call.
+
+Exit code: 0 when at least one timepoint extracted (a partial run prints a
+WARNING naming the ones that failed), 1 when there was nothing to extract or
+every timepoint failed. A timepoint that fails is closed out in the registry
+with stage="failed" and a note, so the atlas stops counting it as live.
 """
 
 import os
@@ -80,6 +85,37 @@ def checkpoint_pause(where):
         "(already-extracted timepoints are skipped)."
     )
     sys.exit(PAUSE_EXIT_CODE)
+
+
+# Longest note this step writes into the registry's operator-owned notes
+# column (matches step1's cap).
+NOTE_MAX_CHARS = 500
+
+
+def registry_note(readable_id, text):
+    """Append a note to the registry row without discarding what the operator
+    wrote there. Idempotent and capped. No-op outside TCRMP mode."""
+    if not registry_client.enabled():
+        return
+    existing = (registry_client.row(readable_id) or {}).get("notes", "") or ""
+    if text in existing:
+        return
+    combined = f"{existing}; {text}" if existing else text
+    if len(combined) > NOTE_MAX_CHARS:
+        combined = combined[-NOTE_MAX_CHARS:]
+    registry_client.update(readable_id, notes=combined)
+
+
+def registry_failure(readable_id, message):
+    """Close a failed timepoint out in the registry and record why.
+
+    Without this the stage set at the top of process_timepoint ("extracting")
+    stays on the row, and the atlas shows a run that never ends.
+    """
+    if not registry_client.enabled():
+        return
+    registry_client.update(readable_id, stage="failed")
+    registry_note(readable_id, message)
 
 
 def _run_ffmpeg(video_path, out_pattern, rate, start_number, hwaccel_args):
@@ -326,6 +362,10 @@ def process_timepoint(readable_id, video_paths, row=None, tcrmp=True):
             "Step 0 error time": error_time,
             "Notes": f"Error: {str(e)}"
         })
+        # The registry already says stage="extracting" from the top of this
+        # function. Left there, the atlas counts this row as a live run for
+        # ever. Writing the failure closes it out; a no-op outside TCRMP mode.
+        registry_failure(readable_id, f"step 0 failed: {str(e)}")
         return readable_id, False
 
 
@@ -389,7 +429,8 @@ def main():
 
     if not work_items:
         logging.error("No videos to extract frames from.")
-        return
+        print("ERROR: no videos to extract frames from; nothing was done.")
+        sys.exit(1)
 
     logging.info(f"Found {len(work_items)} timepoint(s) to potentially process.")
 
@@ -407,10 +448,20 @@ def main():
     successful = sum(1 for _, success in results if success)
     logging.info(f"Frame extraction run complete. Successfully processed {successful}/{len(work_items)} timepoint(s).")
 
-    if successful != len(work_items):
-        failed = [readable_id for readable_id, success in results if not success]
-        if failed:
-            logging.warning(f"Failed to process the following timepoint(s): {', '.join(failed)}")
+    # Exit code is the only signal run_phase1 (and the VICARIUS runner behind
+    # it) reads. Extracting nothing that was queued is a failed run; a partial
+    # run is reported and still succeeds, because the timepoints that did
+    # extract are real work step 1 can pick up.
+    failed = [readable_id for readable_id, success in results if not success]
+    if successful == 0:
+        logging.error(
+            f"Frame extraction failed for every timepoint: {', '.join(failed)}"
+        )
+        print(f"ERROR: frame extraction failed for all {len(work_items)} timepoint(s).")
+        sys.exit(1)
+    if failed:
+        logging.warning(f"Failed to process the following timepoint(s): {', '.join(failed)}")
+        print(f"WARNING: {len(failed)} of {len(work_items)} timepoint(s) failed: {', '.join(failed)}")
 
 
 if __name__ == "__main__":

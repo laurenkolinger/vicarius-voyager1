@@ -8,6 +8,8 @@ access to them throughout the processing workflow.
 import os
 import yaml
 import datetime
+import logging
+import shutil
 import sys
 import csv
 import glob
@@ -150,7 +152,7 @@ PROJECT_NOTES = PARAMS['project'].get('notes', '')
 # Metashape processing parameters
 METASHAPE_DEFAULTS = PARAMS['processing']['metashape']['defaults']
 USE_GPU = PARAMS['processing']['use_gpu']
-MAX_CHUNKS_PER_PSX = PARAMS['processing'].get('max_chunks_per_psx', 5)
+MAX_CHUNKS_PER_PSX = PARAMS['processing'].get('max_chunks_per_psx', 4)
 
 # --- Runtime Variables ---
 TIMESTAMP = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -188,8 +190,54 @@ def get_tracking_files():
     tracking_file = get_tracking_file()
     return [tracking_file] if os.path.exists(tracking_file) else []
 
+def backup_tracking_file(tracking_file):
+    """Copy the tracking file next to itself as status.csv.pre_<TIMESTAMP>.bak.
+
+    Taken before any rewrite of the header, so the file as the operator left
+    it is always recoverable byte for byte. Returns the backup path.
+    """
+    stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup = f"{tracking_file}.pre_{stamp}.bak"
+    suffix = 1
+    while os.path.exists(backup):
+        backup = f"{tracking_file}.pre_{stamp}_{suffix}.bak"
+        suffix += 1
+    shutil.copy2(tracking_file, backup)
+    return backup
+
+
+def migrate_rows(old_header, data_rows, new_header):
+    """Carry status.csv data rows from `old_header` onto `new_header`.
+
+    Columns are matched by name. A column present in both keeps its value; a
+    column that is new in `new_header` starts blank; a column that only the
+    old header carried is never dropped in silence - its value is appended to
+    the row's Notes cell as "migrated: <column>=<value>" whenever it is
+    non-empty. Pure function: no I/O, so the mapping is testable on its own.
+    """
+    dropped = [c for c in old_header if c not in new_header]
+    notes_index = new_header.index("Notes") if "Notes" in new_header else None
+    migrated = []
+    for row in data_rows:
+        old = {col: (row[i] if i < len(row) else "") for i, col in enumerate(old_header)}
+        new_row = [old.get(col, "") for col in new_header]
+        if notes_index is not None:
+            carried = [f"migrated: {c}={old[c]}" for c in dropped if (old.get(c) or "").strip()]
+            if carried:
+                existing = (new_row[notes_index] or "").strip()
+                new_row[notes_index] = "; ".join(([existing] if existing else []) + carried)
+        migrated.append(new_row)
+    return migrated
+
+
 def initialize_tracking(model_id):
-    """Initialize tracking CSV file if not exists, and add a row for the model."""
+    """Initialize the tracking CSV if it does not exist, and add a row for the model.
+
+    An existing file whose header differs from the current schema is never
+    truncated: it is copied to status.csv.pre_<TIMESTAMP>.bak, every row is
+    migrated onto the new header by column name (see migrate_rows), and a
+    WARNING naming the backup is logged and printed.
+    """
     tracking_file = get_tracking_file()
     
     # Ensure parent directory exists (should be project dir, usually exists)
@@ -215,17 +263,52 @@ def initialize_tracking(model_id):
             print(f"Warning: Could not read existing tracking file {tracking_file}: {e}. Will recreate.")
             file_exists = False # Treat as non-existent if unreadable
 
-    # Check if file needs header or if header is incomplete/incorrect
+    # Check if file needs header or if header is incomplete/incorrect.
+    # A header that differs is a schema change, not a licence to throw the
+    # operator's record away: the file is copied aside first, and every
+    # existing row is carried onto the new header by column name. Only a
+    # file that is unreadable or carries the known split-header corruption
+    # is rewritten empty, and even then the copy is taken first.
     needs_header = not file_exists or not rows or current_header != headers
-    
+
     if needs_header:
+        data_rows = rows[1:] if rows else []
+        backup_path = None
+        migrated = []
+        if os.path.exists(tracking_file) and data_rows:
+            try:
+                backup_path = backup_tracking_file(tracking_file)
+            except Exception as e:
+                print(f"Error: Could not back up {tracking_file} before rewriting its header: {e}")
+                return tracking_file
+            if file_exists and current_header:
+                migrated = migrate_rows(current_header, data_rows, headers)
         try:
             with open(tracking_file, 'w', newline='') as csvfile:
                 writer = csv.writer(csvfile)
                 writer.writerow(headers)
-            rows = [headers] # Reset rows to just the header
+                writer.writerows(migrated)
+            rows = [headers] + migrated
             current_header = headers
-            print(f"Initialized/updated tracking file: {tracking_file}")
+            if migrated:
+                message = (
+                    f"status.csv header changed in {tracking_file}: migrated "
+                    f"{len(migrated)} existing row(s) onto the new "
+                    f"{len(headers)}-column header. The file as it stood was copied "
+                    f"to {backup_path}"
+                )
+                logging.warning(message)
+                print(f"WARNING: {message}")
+            elif backup_path:
+                message = (
+                    f"status.csv in {tracking_file} could not be read as data and was "
+                    f"rewritten with a fresh header. The file as it stood was copied "
+                    f"to {backup_path}"
+                )
+                logging.warning(message)
+                print(f"WARNING: {message}")
+            else:
+                print(f"Initialized/updated tracking file: {tracking_file}")
         except Exception as e:
             print(f"Error: Could not write headers to tracking file {tracking_file}: {e}")
             return tracking_file # Return path even if write failed
