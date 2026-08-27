@@ -104,29 +104,42 @@ PROJECT_NAME = get_dir_name(PROJECT_DIR)
 PROJECT_ID = PROJECT_NAME # Use the derived name as the ID
 
 # --- Directory Definitions (Derived from PROJECT_DIR) ---
+# Flat processing-folder layout: the project directory IS the processing
+# folder (it sits next to the source videos). No processing/, output/, or
+# video_source/ subtree. The psx bundle lives at the project root.
 BASE_DIRECTORY = PROJECT_DIR
-PROCESSING_DIRECTORY = os.path.join(PROJECT_DIR, "processing")
-OUTPUT_DIRECTORY = os.path.join(PROJECT_DIR, "output")
-VIDEO_SOURCE_DIRECTORY = os.path.join(PROJECT_DIR, "video_source")
 
 # Define standard subdirectories relative to the project
 DIRECTORIES = {
     "base": BASE_DIRECTORY,
-    "processing_root": PROCESSING_DIRECTORY,
-    "output_root": OUTPUT_DIRECTORY,
-    "video_source": VIDEO_SOURCE_DIRECTORY, # Added video source here
-    "frames": os.path.join(PROCESSING_DIRECTORY, "frames"),  # Step 0 output (processing)
-    "frames_output": os.path.join(OUTPUT_DIRECTORY, "frames"),  # Step 3+ (moved completed)
-    "logs": os.path.join(OUTPUT_DIRECTORY, "logs"),
-    "psxraw": os.path.join(PROCESSING_DIRECTORY, "psxraw"),
-    "orthomosaics": os.path.join(OUTPUT_DIRECTORY, "orthomosaics"),
-    "dems_output": os.path.join(OUTPUT_DIRECTORY, "dems"),
-    "models": os.path.join(OUTPUT_DIRECTORY, "models"),
-    "reports": os.path.join(OUTPUT_DIRECTORY, "reports"), # Added reports directory
-    "psx_output": os.path.join(OUTPUT_DIRECTORY, "psx"), # Renamed from psx_consolidated
-    # "final_outputs": os.path.join(OUTPUT_DIRECTORY, "final")  # DEPRECATED - not used
-    # Removed adobe_presets, metashape_presets, scripts, config
+    "frames": os.path.join(BASE_DIRECTORY, "frames"),
+    "reports": os.path.join(BASE_DIRECTORY, "reports"),
+    "console": os.path.join(BASE_DIRECTORY, "console"),
+    "psx_dir": BASE_DIRECTORY,
 }
+
+# Identity-first tracking file, directly in the project directory.
+TRACKING_FILE = os.path.join(BASE_DIRECTORY, "status.csv")
+
+# status.csv columns: identity first (original_videos, readable_id), then
+# Model ID/Status, then the existing Step 0-4 columns, then scale columns
+# (Scale Error (ppm) and Scale Bars inserted after Scale Error (m)), then
+# Cameras Removed, then Notes last.
+headers = [
+    "original_videos", "readable_id", "Model ID", "Status",
+    "Step 0 complete", "Video Length (s)", "Total Video Frames", "Frames Extracted",
+    "Video Source", "Extraction Timestamp", "Step 0 start time", "Step 0 end time",
+    "Step 0 processing time (s)", "Frames directory", "Step 0 error time",
+    "Step 1 complete", "Step 1 start time", "Step 1 end time", "Step 1 processing time (s)",
+    "Aligned cameras", "Total cameras", "PSX file", "Report file", "Step 1 error time",
+    "Step 2 complete", "Step 2 site", "Step 2 consolidation time",
+    "Step 3 complete", "Step 3 scale method", "Step 3 scale applied",
+    "Step 3 ortho exported", "Step 3 model exported", "Step 3 processing time",
+    "Step 4 complete", "Step 4 web published", "Sketchfab URL",
+    "Step 4 high-res exported", "Step 4 processing time",
+    "Scale", "Scale Error (m)", "Scale Error (ppm)", "Scale Bars",
+    "Cameras Removed", "Notes",
+]
 
 # --- Processing Parameters ---
 
@@ -142,35 +155,15 @@ CHUNK_SIZE = PARAMS['processing']['chunk_size']
 USE_GPU = PARAMS['processing']['use_gpu']
 MAX_CHUNKS_PER_PSX = PARAMS['processing'].get('max_chunks_per_psx', 5)
 
-# --- Static Paths (Relative to Script Location or Assumed Structure) ---
-# Get the directory where this config.py script is located
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-REPO_ROOT = os.path.dirname(SCRIPT_DIR) # Assumes src is one level down from root
-
-# Define preset paths relative to repository root
-DIRECTORIES["adobe_presets"] = os.path.join(REPO_ROOT, "presets/lightroom")
-DIRECTORIES["metashape_presets"] = os.path.join(REPO_ROOT, "presets/metashape") # Changed from premiere
-
 # --- Runtime Variables ---
 TIMESTAMP = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-
-# --- Logging Configuration ---
-LOG_FILE = os.path.join(DIRECTORIES["logs"], f"processing_{PROJECT_NAME}.log")
 
 # --- Helper Functions ---
 
 def create_directories():
-    """Create required subdirectories within the project folder."""
-    # Only create directories defined within the project (processing/output subfolders)
+    """Create required subdirectories within the project folder (frames, reports, console)."""
     for dir_name, dir_path in DIRECTORIES.items():
         if dir_path.startswith(PROJECT_DIR): # Check if path is within the project base
-             # Exclude frames_output from automatic creation (created dynamically in Step 3)
-            if dir_name == "frames_output":
-                continue
-                
-             # Ensure the specific paths for logs and reports are created
-            # Simplify: Just attempt to create all other project-relative dirs
-            # if dir_name in ["logs", "reports", "frames", "psxraw", "orthomosaics", "models", "psx_output"]:
             try:
                 os.makedirs(dir_path, exist_ok=True)
             except OSError as e:
@@ -185,11 +178,13 @@ def ensure_parent_directory(filepath):
         except OSError as e:
             print(f"Warning: Could not create parent directory {parent_dir} for {filepath}: {e}")
 
+def step_log_path(step_name):
+    """Get the log file path for a processing step, under <project>/console."""
+    return os.path.join(DIRECTORIES["console"], f"{step_name}_{TIMESTAMP}.log")
+
 def get_tracking_file(model_id=None): # model_id is not used here anymore
-    """Get tracking file path for the project (now directly in project dir)."""
-    # Use project ID in the filename to create a unique tracking file per project
-    # Place it directly in the project directory (BASE_DIRECTORY)
-    return os.path.join(DIRECTORIES["base"], f"status_{PROJECT_ID}.csv")
+    """Get tracking file path for the project (status.csv directly in the project dir)."""
+    return TRACKING_FILE
 
 def get_tracking_files():
     """Get list of all tracking files for this project (always returns one path)."""
@@ -202,10 +197,8 @@ def initialize_tracking(model_id):
     
     # Ensure parent directory exists (should be project dir, usually exists)
     ensure_parent_directory(tracking_file)
-    
-    # **FIXED: Simplified headers to prevent CSV corruption**
-    headers = ["Model ID", "Status", "Step 0 complete", "Video Length (s)", "Total Video Frames", "Frames Extracted", "Video Source", "Extraction Timestamp", "Step 0 start time", "Step 0 end time", "Step 0 processing time (s)", "Frames directory", "Step 0 error time", "Step 1 complete", "Step 1 start time", "Step 1 end time", "Step 1 processing time (s)", "Aligned cameras", "Total cameras", "PSX file", "Report file", "Step 1 error time", "Step 2 complete", "Step 2 site", "Step 2 consolidation time", "Step 3 complete", "Step 3 scale method", "Step 3 scale applied", "Step 3 ortho exported", "Step 3 model exported", "Step 3 processing time", "Step 4 complete", "Step 4 web published", "Sketchfab URL", "Step 4 high-res exported", "Step 4 processing time", "Notes", "Scale", "Scale Error (m)", "Cameras Removed"]
 
+    # Uses the module-level `headers` (identity-first status.csv schema).
     file_exists = os.path.exists(tracking_file)
     rows = []
     current_header = []
@@ -218,7 +211,7 @@ def initialize_tracking(model_id):
                 if rows:
                     current_header = rows[0]
                     # **FIXED: Detect corrupted CSV (header split across lines)**
-                    if len(rows) > 1 and len(rows[1]) == len(current_header) and rows[1][0] == "Model ID":
+                    if len(rows) > 1 and len(rows[1]) == len(current_header) and rows[1][0] == headers[0]:
                         print(f"🔧 DETECTED CORRUPTED CSV: Header split across lines in {tracking_file}. Fixing...")
                         file_exists = False  # Force recreation
         except Exception as e:
@@ -440,7 +433,7 @@ def get_transect_status(model_id):
     header = rows[0]
     
     # **FIXED: Detect and handle corrupted CSV**
-    if len(rows) > 1 and len(rows[1]) == len(header) and rows[1][0] == "Model ID":
+    if len(rows) > 1 and len(rows[1]) == len(header) and rows[1][0] == headers[0]:
         print(f"🔧 CORRUPTED CSV detected in get_transect_status. Recreating...")
         initialize_tracking(model_id)
         return {"Status": "Initialized"}  # Return basic status
