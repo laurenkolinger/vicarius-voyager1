@@ -174,14 +174,21 @@ def range_psx_paths(project_dir, site, transect):
     return [path for _first, _last, path in found]
 
 
-def current_psx(project_dir, site, transect, year, cap, count_chunks, preferred=None):
+def current_psx(project_dir, site, transect, year, cap, count_chunks,
+                preferred=None, label=None, has_label=None):
     """Resolve the psx a site and transect's next timepoint belongs in.
 
     Returns (path, is_new). `preferred` is the psx the registry already
     records for this site and transect: when it exists on disk and still
     holds fewer than `cap` chunks it wins outright, because the registry
     knows about bundles a name scan cannot reconstruct (a numbered collision
-    sibling, a bundle whose range rename was refused). Otherwise the newest
+    sibling, a bundle whose range rename was refused). A preferred bundle at
+    the cap still wins when it already holds a chunk labeled `label`: that is
+    a forced rerun of a timepoint whose chunk is already in there, and the
+    stale-chunk swap replaces it rather than adding one, so the count does
+    not grow. `has_label(path, label) -> bool` is injected for the same
+    reason `count_chunks` is, and defaults to reading the bundle. Otherwise
+    the newest
     range-named psx for the site and transect is reused when it still holds
     fewer than `cap` chunks;
     count_chunks(path) -> int is injected so this stays testable without
@@ -192,8 +199,11 @@ def current_psx(project_dir, site, transect, year, cap, count_chunks, preferred=
     (two timepoints of one year with a cap of 1) gets a numbered sibling
     rather than being opened and appended to.
     """
-    if preferred and os.path.exists(preferred) and count_chunks(preferred) < cap:
-        return preferred, False
+    if preferred and os.path.exists(preferred):
+        if count_chunks(preferred) < cap:
+            return preferred, False
+        if label and (has_label or psx_has_chunk_label)(preferred, label):
+            return preferred, False
 
     existing = range_psx_paths(project_dir, site, transect)
     if existing:
@@ -214,12 +224,20 @@ def current_psx(project_dir, site, transect, year, cap, count_chunks, preferred=
 def psx_range_target(path, years):
     """Where a bundle should live for `years`, or None when no move is due:
     the name is not a range name (non-TCRMP psx files are left alone), no
-    years were given, or the name is already correct."""
+    years were given, or the name is already correct.
+
+    The range only ever widens. The name's own first and last year join the
+    computed years, so a document read that comes back short - a chunk whose
+    model failed and no longer counts, a hand-deleted chunk - can never move
+    the first year later or the last year earlier and quietly rename a
+    bundle out from under the timepoints it still holds.
+    """
     parts = psx_range_parts(path)
     if parts is None or not years:
         return None
+    span = set(int(y) for y in years) | {parts[2], parts[3]}
     target = os.path.join(os.path.dirname(path),
-                          naming3d().psx_range_name(parts[0], parts[1], years))
+                          naming3d().psx_range_name(parts[0], parts[1], span))
     if os.path.abspath(target) == os.path.abspath(path):
         return None
     return target
@@ -599,6 +617,24 @@ def count_chunks_in_psx(psx_path):
     except Exception as e:
         logging.warning(f"Could not count chunks in {psx_path}: {e}")
         return 0
+
+
+def psx_has_chunk_label(psx_path, label):
+    """True when an existing psx already holds a chunk with this label, read
+    in a throwaway read-only Document. A bundle that is missing or unopenable
+    answers False, which sends the caller down the same path as an empty
+    one."""
+    if not os.path.exists(psx_path):
+        return False
+    try:
+        probe_doc = Metashape.Document()
+        probe_doc.open(psx_path, read_only=True, ignore_lock=True)
+        found = any(c.label == label for c in probe_doc.chunks)
+        probe_doc = None
+        return found
+    except Exception as e:
+        logging.warning(f"Could not read chunk labels from {psx_path}: {e}")
+        return False
 
 
 def verify_psx_chunk(psx_path, transect_id):
@@ -1506,6 +1542,7 @@ def main():
                 project_dir, parts["site"], parts["transect"], parts["year"],
                 MAX_CHUNKS_PER_PSX, count_chunks_in_psx,
                 preferred=preferred_psx(parts["site"], parts["transect"], transect_id),
+                label=transect_id,
             )
             logging.info(
                 f"{transect_id}: {'starting' if is_new else 'appending to'} "

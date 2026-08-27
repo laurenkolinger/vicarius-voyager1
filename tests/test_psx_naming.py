@@ -124,6 +124,7 @@ class PsxHelperTestCase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="step1_psx_")
         self.seen = []
+        self.asked = []
 
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
@@ -134,6 +135,13 @@ class PsxHelperTestCase(unittest.TestCase):
             self.seen.append(os.path.basename(path))
             return counts.get(os.path.basename(path), 0)
         return count_chunks
+
+    def labeller(self, labels):
+        """has_label stand-in: path base name -> the labels that bundle holds."""
+        def has_label(path, label):
+            self.asked.append((os.path.basename(path), label))
+            return label in labels.get(os.path.basename(path), [])
+        return has_label
 
 
 class CurrentPsxTests(PsxHelperTestCase):
@@ -226,6 +234,32 @@ class CurrentPsxTests(PsxHelperTestCase):
         self.assertEqual(path, newest)
         self.assertFalse(is_new)
 
+    def test_preferred_at_the_cap_still_wins_when_it_holds_this_timepoint(self):
+        # A forced rerun: the timepoint's chunk is already in the capped
+        # bundle, so the stale-chunk swap replaces it and the count does not
+        # grow. Starting a new psx here would leave a duplicate behind.
+        touch_psx(self.tmp, "MRS_T1_2022_2024.psx")
+        preferred = touch_psx(self.tmp, "MRS_T1_2024_2024_2.psx")
+        path, is_new = self.step1.current_psx(
+            self.tmp, "MRS", "T1", 2024, 4,
+            self.counter({"MRS_T1_2024_2024_2.psx": 4, "MRS_T1_2022_2024.psx": 1}),
+            preferred=preferred, label="MRS_T1_2024ann",
+            has_label=self.labeller({"MRS_T1_2024_2024_2.psx": ["MRS_T1_2024ann"]}))
+        self.assertEqual(path, preferred)
+        self.assertFalse(is_new)
+        self.assertEqual(self.asked, [("MRS_T1_2024_2024_2.psx", "MRS_T1_2024ann")])
+
+    def test_preferred_at_the_cap_without_this_timepoint_falls_through(self):
+        newest = touch_psx(self.tmp, "MRS_T1_2022_2024.psx")
+        preferred = touch_psx(self.tmp, "MRS_T1_2024_2024_2.psx")
+        path, is_new = self.step1.current_psx(
+            self.tmp, "MRS", "T1", 2025, 4,
+            self.counter({"MRS_T1_2024_2024_2.psx": 4, "MRS_T1_2022_2024.psx": 1}),
+            preferred=preferred, label="MRS_T1_2025_pbl",
+            has_label=self.labeller({"MRS_T1_2024_2024_2.psx": ["MRS_T1_2024ann"]}))
+        self.assertEqual(path, newest)
+        self.assertFalse(is_new)
+
     def test_preferred_that_is_gone_from_disk_is_ignored(self):
         path, is_new = self.step1.current_psx(
             self.tmp, "MRS", "T1", 2023, 4, self.counter({}),
@@ -260,6 +294,13 @@ class RenamePsxRangeTests(PsxHelperTestCase):
         self.assertEqual(self.step1.rename_psx_range(path, [2023, 2024, 2025]), path)
         self.assertTrue(os.path.isfile(path))
         self.assertTrue(os.path.isdir(os.path.join(self.tmp, "MRS_T1_2023_2025.files")))
+
+    def test_no_op_when_the_years_would_narrow_the_range(self):
+        path = touch_psx(self.tmp, "MRS_T1_2023_2024.psx")
+        self.assertEqual(self.step1.rename_psx_range(path, [2024]), path)
+        self.assertTrue(os.path.isfile(path))
+        self.assertTrue(os.path.isdir(os.path.join(self.tmp, "MRS_T1_2023_2024.files")))
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, "MRS_T1_2024_2024.psx")))
 
     def test_no_op_on_a_non_range_name(self):
         path = touch_psx(self.tmp, "psx_1_20260826.psx")
@@ -378,6 +419,35 @@ class RegistryScaleFieldsTests(PsxHelperTestCase):
             self.step1.registry_scale_fields("PASS", 0.0014, 2),
             {"scale_status": "PASS", "scale_error_mm": 1.4,
              "scale_error_ppm": 1867, "scale_bars": 2})
+
+
+class PsxRangeTargetTests(PsxHelperTestCase):
+    """The range a bundle should carry. It widens, and never narrows: a
+    document read that comes back short must not rename a bundle out from
+    under the timepoints it still holds."""
+
+    def test_widens_when_a_later_year_arrives(self):
+        path = os.path.join(self.tmp, "MRS_T1_2023_2024.psx")
+        self.assertEqual(self.step1.psx_range_target(path, [2024, 2025]),
+                         os.path.join(self.tmp, "MRS_T1_2023_2025.psx"))
+
+    def test_no_move_when_the_computed_years_only_narrow(self):
+        path = os.path.join(self.tmp, "MRS_T1_2023_2024.psx")
+        self.assertIsNone(self.step1.psx_range_target(path, [2024]))
+
+    def test_keeps_the_first_year_when_the_read_comes_back_short(self):
+        # Only the 2025 chunk reported a model, but 2023 and 2024 are still
+        # in the bundle: the name must widen to 2023_2025, not become
+        # 2025_2025.
+        path = os.path.join(self.tmp, "MRS_T1_2023_2024.psx")
+        self.assertEqual(self.step1.psx_range_target(path, [2025]),
+                         os.path.join(self.tmp, "MRS_T1_2023_2025.psx"))
+
+    def test_no_target_without_years_or_for_a_non_range_name(self):
+        self.assertIsNone(self.step1.psx_range_target(
+            os.path.join(self.tmp, "MRS_T1_2023_2024.psx"), []))
+        self.assertIsNone(self.step1.psx_range_target(
+            os.path.join(self.tmp, "psx_1_20260826.psx"), [2023, 2024]))
 
 
 class PsxRangePartsTests(PsxHelperTestCase):
