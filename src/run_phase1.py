@@ -158,8 +158,8 @@ def detect_metashape() -> str:
 def create_venv(project_dir: Path) -> None:
     """Create Python 3.9 venv and install requirements."""
     venv_dir = project_dir / ".venv"
-    if venv_dir.exists():
-        print("  Virtual environment already exists, skipping creation.")
+    if (venv_dir / "bin" / "python").exists():
+        print("  venv present, reusing.")
         return
 
     python39 = shutil.which("python3.9")
@@ -177,6 +177,18 @@ def create_venv(project_dir: Path) -> None:
 
     print("  Installing requirements...")
     subprocess.run([str(pip), "install", "-r", str(requirements_file)], check=True)
+
+
+def ensure_project_ready(project_dir: Path) -> None:
+    """One-time-per-folder setup a processing folder needs before step0/step1
+    can run: the .venv. Checks for <project>/.venv/bin/python itself, ahead
+    of calling create_venv, so a TCRMP folder shared across several
+    timepoints in one run only pays for venv setup once - the check has to
+    live here rather than solely inside create_venv so it still holds when
+    create_venv is swapped out (e.g. tests)."""
+    if (project_dir / ".venv" / "bin" / "python").exists():
+        return
+    create_venv(project_dir)
 
 
 def open_params_for_editing(project_dir: Path) -> None:
@@ -337,15 +349,18 @@ def _earliest_date_for(site: str, transect: str) -> str:
 
 def prepare_tcrmp_folder(row: dict) -> Path:
     """Ensure the processing folder for a TCRMP registry row exists next to
-    its video, and record its location back into the registry before step 0
-    runs. Returns the project directory.
+    its video, has a ready .venv, and has its location recorded back into
+    the registry - all before step 0 runs. Returns the project directory.
 
     All timepoints of the same site+transect share one processing folder
     and one growing psx: if any row of that site/transect already has a
     processing_location, this reuses it (even if it differs from THIS row's
     own video_location); a new folder is only created, next to THIS row's
     video, when no row of that site/transect has one yet - named for the
-    earliest known timepoint regardless of processing order.
+    earliest known timepoint regardless of processing order. venv setup
+    (ensure_project_ready) is per-folder, not per-row, so a shared folder
+    only pays for it once even when several timepoints are processed in the
+    same run.
     """
     registry_client.configure({"processing": {"tcrmp": True}})
     readable_id = row["readable_id"]
@@ -384,6 +399,9 @@ def prepare_tcrmp_folder(row: dict) -> Path:
     registry_client.stage(readable_id, 1, "starting")
 
     status_rows.write_identity_row(project_dir, row.get("original_videos", ""), readable_id)
+
+    print("  Ensuring Python environment...")
+    ensure_project_ready(project_dir)
 
     return project_dir
 

@@ -11,6 +11,8 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from pathlib import Path
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SRC = os.path.join(os.path.dirname(HERE), "src")
@@ -68,6 +70,23 @@ class RunPhase1SetupTests(unittest.TestCase):
             process="true", video_location=self.video_dir_b,
             original_videos="TCRMP20240412_3D_MRS_T1.MP4",
         )
+
+        # create_venv actually running python3.9 -m venv + pip install for
+        # every test would be slow and network-dependent; stand in a fast
+        # recorder that reproduces just the filesystem effect
+        # ensure_project_ready's own idempotency check looks for
+        # (.venv/bin/python), so the dedup behavior under test is real.
+        self.venv_calls = []
+
+        def _fake_create_venv(project_dir):
+            self.venv_calls.append(Path(project_dir))
+            venv_bin = Path(project_dir) / ".venv" / "bin"
+            venv_bin.mkdir(parents=True, exist_ok=True)
+            (venv_bin / "python").touch()
+
+        patcher = mock.patch("run_phase1.create_venv", side_effect=_fake_create_venv)
+        self.mock_create_venv = patcher.start()
+        self.addCleanup(patcher.stop)
 
     def tearDown(self):
         shutil.rmtree(self.registry_root, ignore_errors=True)
@@ -170,6 +189,34 @@ class RunPhase1SetupTests(unittest.TestCase):
 
         for readable_id in ("MRS_T1_2024_pbl", "MRS_T1_2023ann"):
             self.assertEqual(registry_client.row(readable_id)["processing_location"], str(project_dir_first))
+
+    # -- ensure_project_ready / venv setup on the TCRMP path -------------
+
+    def test_ensure_project_ready_calls_create_venv_once(self):
+        project_dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, str(project_dir), True)
+
+        run_phase1.ensure_project_ready(project_dir)
+        run_phase1.ensure_project_ready(project_dir)
+
+        self.assertEqual(self.mock_create_venv.call_count, 1)
+        self.assertTrue((project_dir / ".venv" / "bin" / "python").exists())
+
+    def test_prepare_tcrmp_folder_creates_venv_once_per_shared_folder(self):
+        # Two rows that resolve to the SAME processing folder (folder reuse,
+        # per test_prepare_tcrmp_folder_names_for_earliest_timepoint_...
+        # above): create_venv must run exactly once for that folder, not
+        # once per row, even though prepare_tcrmp_folder is called twice.
+        later_row = registry_client.row("MRS_T1_2024_pbl")
+        earlier_row = registry_client.row("MRS_T1_2023ann")
+
+        project_dir_first = run_phase1.prepare_tcrmp_folder(later_row)
+        project_dir_second = run_phase1.prepare_tcrmp_folder(earlier_row)
+
+        self.assertEqual(project_dir_first, project_dir_second)
+        self.assertEqual(self.mock_create_venv.call_count, 1)
+        self.assertEqual(self.venv_calls, [project_dir_first])
+        self.assertTrue((project_dir_first / ".venv" / "bin" / "python").exists())
 
 
 if __name__ == "__main__":

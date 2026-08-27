@@ -76,6 +76,13 @@ parameters:
       psx per site and transect. Turn off to process a plain input/project
       pair by original file name instead (no registry, no NAS video lookup).
 
+  - name: "force"
+    type: "boolean"
+    default: false
+    description: >-
+      Reprocess timepoints whose step 1 is already complete. Off by default
+      so reruns only pick up unfinished work.
+
   - name: "ids"
     type: "string"
     default: ""
@@ -214,13 +221,16 @@ cli:
     # launch with input_dir/output_dir left blank already processes every
     # pending registry timepoint hands-free through purpose_flag/yes_flag/
     # skip_vim_flag alone (run_phase1.py's own --tcrmp default does the
-    # rest). tcrmp_flag/ids_flag/site_flag/transect_flag/force_flag document
-    # the full CLI contract for a scoped or forced TCRMP run (one site and
-    # transect, specific ids, or reprocessing a completed timepoint).
-    # vicarius_ui_os/runner.py's generic argv builder only forwards the five
-    # keys above today, so until it is extended, a scoped/forced run is
-    # typed directly into the terminal launch's command line.
+    # rest). tcrmp_flag/tcrmp_off_flag/ids_flag/site_flag/transect_flag/
+    # force_flag document the full CLI contract for a scoped or forced TCRMP
+    # run (one site and transect, specific ids, or reprocessing a completed
+    # timepoint) and for turning TCRMP mode off. For a boolean parameter the
+    # runner is expected to send <name>_flag when the value is true and
+    # <name>_off_flag when it is false - tcrmp is the one boolean parameter
+    # here with a meaningful off state (--no-tcrmp); force has none (its
+    # off state is simply omitting --force).
     tcrmp_flag: "--tcrmp"
+    tcrmp_off_flag: "--no-tcrmp"
     ids_flag: "--ids"
     site_flag: "--site"
     transect_flag: "--transect"
