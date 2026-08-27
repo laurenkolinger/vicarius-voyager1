@@ -5,11 +5,11 @@ prune markers not named in the declared scale bars, build the bars, apply
 the transform, report mean absolute scale-bar error in metres. Metashape is
 passed in so tests can inject a fake.
 
-prune_marker_projections implements the NOAA coral photogrammetry SOP
-(TM NMFS-PIFSC-159, 2023) marker QC step: drop each marker's worst-error
-projection until every marker's worst reprojection error is under a pixel
-threshold, subject to a minimum-projections floor. It is an A/B alternative,
-gated off by default (model_processing.marker_projection_prune).
+prune_marker_projections implements a marker projection pruning QC step:
+drop each marker's worst-error projection until every marker's worst
+reprojection error is under a pixel threshold, subject to a
+minimum-projections floor. It is an A/B alternative, gated off by default
+(model_processing.marker_projection_prune).
 """
 import math
 
@@ -96,13 +96,13 @@ def add_scale_bars(chunk, scale_bars, log):
 def prune_marker_projections(Metashape, chunk, log, max_error_px=0.8, min_projections=5):
     """Drop each marker's worst-error projection until it clears max_error_px.
 
-    Per NOAA TM NMFS-PIFSC-159 Section 4.3.2: per-projection reprojection
-    error is the pixel distance between where the marker's 3D position
-    reprojects onto a camera (camera.project) and the actual detected
-    projection coordinate for that camera. While a marker's worst remaining
-    projection exceeds max_error_px AND it has more than min_projections
-    left, the worst projection is removed (marker.projections[camera] =
-    None) and the marker's error is recomputed against what remains.
+    Per-projection reprojection error is the pixel distance between where
+    the marker's 3D position reprojects onto a camera (camera.project) and
+    the actual detected projection coordinate for that camera. While a
+    marker's worst remaining projection exceeds max_error_px AND it has
+    more than min_projections left, the worst projection is removed
+    (marker.projections[camera] = None) and the marker's error is
+    recomputed against what remains.
     Cameras without a transform (unaligned) are skipped entirely -- there is
     nothing to project them with, and they do not count toward
     min_projections.

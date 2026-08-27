@@ -822,16 +822,18 @@ def process_transect(transect_id, chunk, doc, psx_path):
 
         # Filter points and optimize cameras. "legacy" is the original
         # RU -> optimize -> RE -> PA sequence, byte-identical to before.
-        # "noaa" runs the capped iterative gradual-selection scheme
+        # "capped" runs the capped iterative gradual-selection scheme
         # (RU -> PA -> RE, each capped and re-optimized) from
         # selection_utils; it is activated via
-        # products_cfg.gradual_selection_mode.
+        # products_cfg.gradual_selection_mode. The pre-rename config token
+        # is also accepted here (same branch), for back-compat with
+        # existing analysis_params.yaml files.
         registry_client.stage(transect_id, 1, "filtering")
         gradual_selection_mode = products_cfg.get("gradual_selection_mode", "legacy")
-        if gradual_selection_mode == "noaa":
+        if gradual_selection_mode in ("capped", "noaa"):
             logging.info("Filtering points and optimizing cameras (capped iterative selection)")
 
-            def noaa_optimize():
+            def capped_optimize():
                 chunk.optimizeCameras(
                     fit_f=True, fit_cx=True, fit_cy=True,
                     fit_b1=False, fit_b2=False,
@@ -840,8 +842,8 @@ def process_transect(transect_id, chunk, doc, psx_path):
                     adaptive_fitting=False,
                 )
 
-            selection_utils.noaa_gradual_selection(
-                Metashape, chunk, METASHAPE_DEFAULTS, logging.info, noaa_optimize
+            selection_utils.capped_gradual_selection(
+                Metashape, chunk, METASHAPE_DEFAULTS, logging.info, capped_optimize
             )
         else:
             logging.info("Filtering points and optimizing cameras")

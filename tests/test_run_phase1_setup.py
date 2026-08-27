@@ -285,5 +285,25 @@ class ResetStep1Tests(unittest.TestCase):
         self.assertEqual(rows[0]["Step 1 complete"], "False")
 
 
+class VicariusRootDefaultTests(unittest.TestCase):
+    """Task 18a: run_phase1's VICARIUS_ROOT fallback (used to reach the
+    platform's _logging/src package) must resolve to a directory that
+    actually exists on this box, or platform process logging silently
+    never imports on a bare-shell run with no VICARIUS_ROOT set."""
+
+    def test_default_resolves_to_an_existing_directory(self):
+        import importlib
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("VICARIUS_ROOT", None)
+            importlib.reload(run_phase1)
+            resolved = run_phase1.VICARIUS_ROOT
+        importlib.reload(run_phase1)  # restore module state for later tests
+
+        self.assertTrue(
+            os.path.isdir(resolved),
+            f"VICARIUS_ROOT default {resolved!r} is not a directory on this box",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

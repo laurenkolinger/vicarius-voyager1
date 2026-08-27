@@ -44,7 +44,7 @@ processing:
       preserve_edges: false # do not preserve sharp edges while smoothing
 
   step1_products:
-    gradual_selection_mode: "noaa" # capped iterative selection (internal value; code branches on it)
+    gradual_selection_mode: "capped" # capped iterative selection (internal value; code branches on it)
     scale_in_step1: true # detect coded targets and apply the scale bars after the model builds
     build_dem: true # build a DEM from the Ultra High depth maps and keep it in the psx
     dem_resolution: 0 # DEM resolution in metres per pixel; 0 = native

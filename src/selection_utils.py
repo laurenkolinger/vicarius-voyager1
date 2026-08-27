@@ -1,16 +1,16 @@
-"""NOAA gradual-selection scheme for 3D_init Step 1 (A/B alternative).
+"""Capped gradual-selection scheme for 3D_init Step 1 (A/B alternative).
 
-Ported from the NOAA coral photogrammetry SOP (TM NMFS-PIFSC-159, 2023),
-Section 4.3.1: iterative cull-and-reoptimize of the sparse tie point cloud
-in the order ReconstructionUncertainty, ProjectionAccuracy, ReprojectionError,
-re-running camera optimization after each removal, with a cap on how large a
-fraction of the current tie point cloud any single criterion is allowed to
-remove in one pass.
+Iterative cull-and-reoptimize of the sparse tie point cloud in the order
+ReconstructionUncertainty, ProjectionAccuracy, ReprojectionError, re-running
+camera optimization after each removal, with a cap on how large a fraction
+of the current tie point cloud any single criterion is allowed to remove in
+one pass.
 
 The cap-search logic (cap_adjusted_threshold) is pure and Metashape-free so
-it can be unit tested with plain callables. noaa_gradual_selection wraps it
-with the real Metashape.TiePoints.Filter calls; Metashape is passed in so
-step1.py's actual module is used at runtime while tests can inject a fake.
+it can be unit tested with plain callables. capped_gradual_selection wraps
+it with the real Metashape.TiePoints.Filter calls; Metashape is passed in
+so step1.py's actual module is used at runtime while tests can inject a
+fake.
 
 Filter mechanics, confirmed against the installed Metashape 2.2.2 Python API
 via `metashape -r` and `help()` (Metashape.TiePoints.Filter, TiePoints,
@@ -21,8 +21,8 @@ TiePoints.Point, Chunk.optimizeCameras):
     exceeds threshold; it is not cumulative, calling it again with a new
     threshold replaces the prior selection.
   - Filter.removePoints(threshold) is a one-shot select+remove and is what
-    the legacy path uses; NOAA mode needs to probe counts before committing
-    to a threshold, so it uses selectPoints to probe and
+    the legacy path uses; capped mode needs to probe counts before
+    committing to a threshold, so it uses selectPoints to probe and
     chunk.tie_points.removeSelectedPoints() to commit.
   - Metashape.TiePoints.Point.selected is a bool per-point flag.
 """
@@ -115,8 +115,8 @@ def _run_criterion(Metashape, chunk, criterion_attr, criterion_name, start_thres
     return final_threshold, removed_count, remaining_count
 
 
-def noaa_gradual_selection(Metashape, chunk, cfg, log, optimize):
-    """Run the NOAA gradual-selection scheme against chunk.tie_points.
+def capped_gradual_selection(Metashape, chunk, cfg, log, optimize):
+    """Run the capped gradual-selection scheme against chunk.tie_points.
 
     Order: ReconstructionUncertainty, ProjectionAccuracy, ReprojectionError.
     Each criterion starts at its threshold from cfg (same keys as the legacy
@@ -124,11 +124,16 @@ def noaa_gradual_selection(Metashape, chunk, cfg, log, optimize):
     reprojection_error), is cap-adjusted so it never removes more than its
     cap fraction of the current tie point count (0.5 for
     ReconstructionUncertainty and ProjectionAccuracy, 0.10 for
-    ReprojectionError, per NOAA TM NMFS-PIFSC-159 Section 4.3.1), removes the
-    selected points, and is followed by a call to the optimize callable.
+    ReprojectionError), removes the selected points, and is followed by a
+    call to the optimize callable.
     """
     for criterion_attr, cfg_key, criterion_name, cap_fraction in _CRITERIA:
         _run_criterion(
             Metashape, chunk, criterion_attr, criterion_name,
             cfg[cfg_key], cap_fraction, optimize, log,
         )
+
+
+# Back-compat alias for the pre-rename function name. step1.py's accepted
+# config values still resolve to this same function under either name.
+noaa_gradual_selection = capped_gradual_selection

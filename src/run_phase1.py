@@ -25,6 +25,7 @@ Usage:
 """
 
 import argparse
+import logging
 import os
 import re
 import shutil
@@ -40,14 +41,19 @@ import videos as videos_mod
 # ---------------------------------------------------------------------------
 # VICARIUS logging integration
 # ---------------------------------------------------------------------------
-VICARIUS_ROOT = os.environ.get("VICARIUS_ROOT", "/mnt/vicarius_drive/vicarius")
+VICARIUS_ROOT = os.environ.get("VICARIUS_ROOT", "/mnt/rip/vicarius_drive/vicarius")
 sys.path.insert(0, os.path.join(VICARIUS_ROOT, "_logging", "src"))
 try:
     from vicarius_log import get_log
 
     VICARIUS_LOGGING = True
-except ImportError:
+except ImportError as exc:
     VICARIUS_LOGGING = False
+    logging.warning(
+        f"VICARIUS platform logging unavailable (could not import vicarius_log "
+        f"from {VICARIUS_ROOT}/_logging/src): {exc}. Run events will not be "
+        f"recorded to the platform log."
+    )
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -201,9 +207,9 @@ def open_params_for_editing(project_dir: Path) -> None:
     print()
     print("  Key settings to review/edit:")
     print("    processing.frames_per_transect  (default: 1000)")
-    print("    processing.chunk_size           (default: 1000)")
-    print("    processing.use_gpu              (default: true)")
     print("    processing.max_chunks_per_psx   (default: 4)")
+    print("    processing.use_gpu              (default: true)")
+    print("    processing.tcrmp                (default: true)")
     print("    model_processing.scale_bars     (set your scale bar markers/distances)")
     print()
     print("  Vim quick reference:")
@@ -291,8 +297,9 @@ def print_manual_instructions(project_dir: Path) -> None:
     print()
     print("  3. Save the project and quit Metashape")
     print()
-    print("  When done with all models, run Phase 2 (3D_phase2) for automatic")
-    print("  scaling and export.")
+    print("  When done with all models, continue with the step 2 module for")
+    print("  automatic scaling and export (see STEP2_HANDOFF.md at the")
+    print("  module top level).")
     print()
     print("=" * 60)
 
