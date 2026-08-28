@@ -8,7 +8,7 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
-from selection_utils import cap_adjusted_threshold
+from selection_utils import cap_adjusted_threshold, capped_gradual_selection
 
 
 class CapAdjustedThresholdTests(unittest.TestCase):
@@ -98,6 +98,61 @@ class CapAdjustedThresholdTests(unittest.TestCase):
         )
         self.assertEqual(result, 15)
         self.assertEqual(len(calls), 1)
+
+
+class _FakeTiePoints:
+    def __init__(self, points):
+        self.points = points
+
+
+class _FakeChunk:
+    def __init__(self, tie_points, label="MRS_T1_2023ann"):
+        self.tie_points = tie_points
+        self.label = label
+
+
+class CappedGradualSelectionTiePointGuardTests(unittest.TestCase):
+    # pass2 fix: alignment that produces no tie points must fail with a
+    # clear RuntimeError naming the chunk, not crash inside _run_criterion's
+    # len(chunk.tie_points.points) with an opaque
+    # "TypeError: object of type 'NoneType' has no len()".
+
+    def test_none_tie_points_raises_runtime_error_naming_the_chunk(self):
+        chunk = _FakeChunk(tie_points=None, label="MRS_T1_2024ann")
+        with self.assertRaises(RuntimeError) as ctx:
+            capped_gradual_selection(
+                None, chunk, {}, lambda *a: None, lambda: None,
+            )
+        message = str(ctx.exception)
+        self.assertIn("MRS_T1_2024ann", message)
+        self.assertIn("no tie points after alignment", message)
+
+    def test_empty_points_list_raises_runtime_error(self):
+        chunk = _FakeChunk(tie_points=_FakeTiePoints(points=[]), label="MRS_T1_2025_pbl")
+        with self.assertRaises(RuntimeError) as ctx:
+            capped_gradual_selection(
+                None, chunk, {}, lambda *a: None, lambda: None,
+            )
+        self.assertIn("MRS_T1_2025_pbl", str(ctx.exception))
+
+    def test_tie_points_object_with_none_points_attribute_raises(self):
+        # The shape actually observed in the pass2 reproduction: chunk.tie_points
+        # is a real object, but its own .points is None.
+        chunk = _FakeChunk(tie_points=_FakeTiePoints(points=None))
+        with self.assertRaises(RuntimeError):
+            capped_gradual_selection(
+                None, chunk, {}, lambda *a: None, lambda: None,
+            )
+
+    def test_guard_does_not_fire_on_a_populated_tie_point_cloud(self):
+        # A non-empty tie_points must reach the real filtering loop (which
+        # then fails on the deliberately-empty cfg dict) rather than being
+        # rejected by the guard - proves the guard is not over-broad.
+        chunk = _FakeChunk(tie_points=_FakeTiePoints(points=[object(), object()]))
+        with self.assertRaises(KeyError):
+            capped_gradual_selection(
+                None, chunk, {}, lambda *a: None, lambda: None,
+            )
 
 
 if __name__ == "__main__":

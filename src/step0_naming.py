@@ -1,9 +1,35 @@
-"""Pure naming helpers for step0.py (frame extraction). No config import, no
-I/O, so tests can exercise these without Metashape or a project directory on
-disk (config.py has import-time side effects: it reads sys.argv and creates
-directories).
+"""Pure naming and frame-count helpers for step0.py (frame extraction). No
+config import, no I/O, so tests can exercise these without Metashape or a
+project directory on disk (config.py has import-time side effects: it reads
+sys.argv and creates directories).
 """
 import os
+
+
+def effective_frame_count(requested, nb_frames):
+    """Clamp a requested extraction count to the source video's own frame count.
+
+    `requested` is how many frames step0 is about to ask ffmpeg for (either
+    FRAMES_PER_TRANSECT directly, or its per-part share of it for a
+    multi-part video). `nb_frames` is what ffprobe reported for that part
+    (videos.probe's "nb_frames"); it is None when ffprobe could not report a
+    count for the container/codec, in which case there is nothing reliable
+    to clamp against and `requested` passes through unchanged.
+
+    Asking ffmpeg for more frames than a video has does not fail: ffmpeg
+    raises its output fps above the source's native rate and duplicates
+    frames to fill the gap. Metashape then has nothing distinct to align
+    those duplicates on, which surfaces much later as an opaque tie-point
+    failure (see selection_utils.capped_gradual_selection's guard and
+    step1.py's post-alignment guard) instead of here, where the actual cause
+    is knowable up front.
+
+    The caller is responsible for logging a WARNING naming both numbers when
+    clamping actually happens; this function only computes the clamped value.
+    """
+    if nb_frames is None:
+        return requested
+    return min(requested, nb_frames)
 
 
 def frame_output_pattern(video_path, frames_dir):

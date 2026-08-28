@@ -48,7 +48,7 @@ from config import (
 import manifest
 import registry_client
 import videos
-from step0_naming import frame_output_pattern, identity_for
+from step0_naming import effective_frame_count, frame_output_pattern, identity_for
 
 # Configure logging
 logging.basicConfig(
@@ -293,6 +293,17 @@ def process_timepoint(readable_id, video_paths, row=None, tcrmp=True):
             if frames_for_part <= 0:
                 logging.info(f"Skipping {part['path']}: 0 frames allocated by duration proportion.")
                 continue
+
+            clamped_frames_for_part = effective_frame_count(frames_for_part, part["nb_frames"])
+            if clamped_frames_for_part < frames_for_part:
+                logging.warning(
+                    f"{readable_id}: requested {frames_for_part} frames from "
+                    f"{os.path.basename(part['path'])} but the source video "
+                    f"reports only {part['nb_frames']} frames; ffmpeg would "
+                    "duplicate frames to reach the requested count. Clamping "
+                    f"extraction to {clamped_frames_for_part} frames."
+                )
+                frames_for_part = clamped_frames_for_part
 
             num_extracted, _ = extract_frames_for_part(
                 part["path"], output_dir_final, frames_for_part,

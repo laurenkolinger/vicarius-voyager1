@@ -848,6 +848,20 @@ def process_transect(transect_id, chunk, doc, psx_path):
             camera.transform = None
         chunk.alignCameras(cameras=unaligned_cameras, reset_alignment=False)
 
+        # Fail clearly, right here, when alignment produced nothing to
+        # filter (e.g. a degenerate video whose extracted frames are mostly
+        # duplicates, see step0's frames_per_transect clamp). Left
+        # unguarded, the legacy path's Filter.removePoints and the capped
+        # path's selection_utils.capped_gradual_selection both eventually
+        # hit an uninformative TypeError deep inside tie-point filtering
+        # instead of naming the actual cause.
+        if chunk.tie_points is None or not chunk.tie_points.points:
+            raise RuntimeError(
+                f"no tie points after alignment for {chunk.label}: alignment "
+                "produced nothing to filter; check that the frames are distinct "
+                "and the video is longer than frames_per_transect / extraction rate"
+            )
+
         # Reset the region
         chunk.resetRegion()
 

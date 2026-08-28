@@ -126,7 +126,23 @@ def capped_gradual_selection(Metashape, chunk, cfg, log, optimize):
     ReconstructionUncertainty and ProjectionAccuracy, 0.10 for
     ReprojectionError), removes the selected points, and is followed by a
     call to the optimize callable.
+
+    Raises RuntimeError up front when alignment left the chunk with no tie
+    points to filter (chunk.tie_points is None, or chunk.tie_points.points is
+    None/empty). Left unguarded, `_run_criterion`'s `len(chunk.tie_points.points)`
+    crashes with an unreadable `TypeError: object of type 'NoneType' has no
+    len()`. A degenerate input reaches this state too, for example a video
+    extracted at more frames than it actually has, which fills the frame
+    sequence with duplicates that have nothing distinct to align on; the
+    failure should name the actual cause instead of crashing on a length
+    check.
     """
+    if chunk.tie_points is None or not chunk.tie_points.points:
+        raise RuntimeError(
+            f"no tie points after alignment for {chunk.label}: alignment "
+            "produced nothing to filter; check that the frames are distinct "
+            "and the video is longer than frames_per_transect / extraction rate"
+        )
     for criterion_attr, cfg_key, criterion_name, cap_fraction in _CRITERIA:
         _run_criterion(
             Metashape, chunk, criterion_attr, criterion_name,

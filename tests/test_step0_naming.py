@@ -1,6 +1,6 @@
-"""Tests for src/step0_naming.py (Task 10): pure frame-naming and identity
-helpers used by step0.py before any ffmpeg call. No config import (config.py
-has import-time argv/filesystem side effects), no Metashape.
+"""Tests for src/step0_naming.py (Task 10): pure frame-naming, identity, and
+frame-count helpers used by step0.py before any ffmpeg call. No config import
+(config.py has import-time argv/filesystem side effects), no Metashape.
 """
 import os, sys, unittest
 
@@ -66,6 +66,31 @@ class IdentityForTests(unittest.TestCase):
     def test_non_tcrmp_requires_video_path(self):
         with self.assertRaises(ValueError):
             step0_naming.identity_for(video_path=None, tcrmp=False)
+
+
+class EffectiveFrameCountTests(unittest.TestCase):
+    # pass2 fix: a requested extraction count above the source video's own
+    # frame count must clamp, not silently ask ffmpeg to duplicate frames
+    # (which later surfaces as an opaque tie-point failure in step1).
+
+    def test_requested_below_source_count_passes_through_unchanged(self):
+        self.assertEqual(step0_naming.effective_frame_count(200, 1000), 200)
+
+    def test_requested_above_source_count_clamps_to_source_count(self):
+        # The pass2 reproduction: 1000 frames requested from a 200-frame source.
+        self.assertEqual(step0_naming.effective_frame_count(1000, 200), 200)
+
+    def test_requested_equal_to_source_count_passes_through(self):
+        self.assertEqual(step0_naming.effective_frame_count(200, 200), 200)
+
+    def test_unknown_source_count_skips_the_clamp(self):
+        # ffprobe could not report nb_frames for this container/codec; there
+        # is nothing reliable to compare against, so the request is honored
+        # as-is rather than guessed at.
+        self.assertEqual(step0_naming.effective_frame_count(1000, None), 1000)
+
+    def test_zero_source_count_clamps_to_zero(self):
+        self.assertEqual(step0_naming.effective_frame_count(1000, 0), 0)
 
 
 if __name__ == "__main__":
