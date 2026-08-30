@@ -52,10 +52,18 @@ class RunPhase1SetupTests(unittest.TestCase):
         registry_client.configure({"processing": {"tcrmp": True}})
         self.assertTrue(registry_client.enabled(), "registry_client did not enable with tcrmp=True")
 
-        # Two video source directories (deliberately different, so folder
-        # reuse can be tested against the row's OWN video_location).
-        self.video_dir_a = tempfile.mkdtemp()  # holds the earlier (2023ann) video
-        self.video_dir_b = tempfile.mkdtemp()  # holds the later (2024_pbl) video
+        # Two video source directories under two different corpus roots
+        # (deliberately different, so folder reuse can be tested against the
+        # row's OWN video_location). Each mimics the real season-folder
+        # layout (corpus_root/2023_annual/video.MOV): the processing folder
+        # must be created as a SIBLING of the season folder, i.e. directly
+        # in the corpus root, never inside the season folder.
+        self.corpus_root_a = tempfile.mkdtemp()
+        self.corpus_root_b = tempfile.mkdtemp()
+        self.video_dir_a = os.path.join(self.corpus_root_a, "2023_annual")  # earlier (2023ann) video
+        self.video_dir_b = os.path.join(self.corpus_root_b, "2024_pbl")  # later (2024_pbl) video
+        os.makedirs(self.video_dir_a)
+        os.makedirs(self.video_dir_b)
         self.video_a = os.path.join(self.video_dir_a, "TCRMP20231015_3D_MRS_T1.MOV")
         self.video_b = os.path.join(self.video_dir_b, "TCRMP20240412_3D_MRS_T1.MP4")
         _tiny_video(self.video_a)
@@ -91,8 +99,8 @@ class RunPhase1SetupTests(unittest.TestCase):
 
     def tearDown(self):
         shutil.rmtree(self.registry_root, ignore_errors=True)
-        shutil.rmtree(self.video_dir_a, ignore_errors=True)
-        shutil.rmtree(self.video_dir_b, ignore_errors=True)
+        shutil.rmtree(self.corpus_root_a, ignore_errors=True)
+        shutil.rmtree(self.corpus_root_b, ignore_errors=True)
         os.environ.pop("VICARIUS_3D_REGISTRY_ROOT", None)
 
     # -- select_rows ----------------------------------------------------
@@ -140,13 +148,16 @@ class RunPhase1SetupTests(unittest.TestCase):
 
     # -- prepare_tcrmp_folder --------------------------------------------
 
-    def test_prepare_tcrmp_folder_creates_named_folder_next_to_video(self):
+    def test_prepare_tcrmp_folder_creates_named_folder_beside_video_folder(self):
         row = registry_client.row("MRS_T1_2023ann")
         project_dir = run_phase1.prepare_tcrmp_folder(row)
 
         expected_name = naming3d.processing_folder_name("MRS", "T1", "20231015")
         self.assertEqual(expected_name, "MRS_T1_2023ann_3dprocessing")
-        self.assertEqual(project_dir, __import__("pathlib").Path(self.video_dir_a) / expected_name)
+        # Sibling of the season folder, directly in the corpus root - never
+        # inside the video's own folder.
+        self.assertEqual(project_dir, Path(self.corpus_root_a) / expected_name)
+        self.assertFalse((Path(self.video_dir_a) / expected_name).exists())
         self.assertTrue(project_dir.is_dir())
         for sub in ("console", "frames", "reports"):
             self.assertTrue((project_dir / sub).is_dir(), sub)
@@ -175,21 +186,47 @@ class RunPhase1SetupTests(unittest.TestCase):
     def test_prepare_tcrmp_folder_names_for_earliest_timepoint_even_when_later_runs_first(self):
         # Process the LATER timepoint first. The folder must still be named
         # for the earliest known timepoint of the site/transect (2023ann),
-        # and it goes next to the row actually being processed (video_dir_b).
+        # and it goes beside the video folder of the row actually being
+        # processed (corpus_root_b, sibling of video_dir_b).
         later_row = registry_client.row("MRS_T1_2024_pbl")
         project_dir_first = run_phase1.prepare_tcrmp_folder(later_row)
         self.assertEqual(project_dir_first.name, "MRS_T1_2023ann_3dprocessing")
-        self.assertEqual(project_dir_first.parent, __import__("pathlib").Path(self.video_dir_b))
+        self.assertEqual(project_dir_first.parent, Path(self.corpus_root_b))
 
         # Now process the earlier timepoint. It must REUSE the folder just
-        # created next to the OTHER row's video, not create a new one next
-        # to its own video_location (video_dir_a).
+        # created beside the OTHER row's video folder, not create a new one
+        # beside its own video_location (corpus_root_a).
         earlier_row = registry_client.row("MRS_T1_2023ann")
         project_dir_second = run_phase1.prepare_tcrmp_folder(earlier_row)
         self.assertEqual(project_dir_second, project_dir_first)
 
         for readable_id in ("MRS_T1_2024_pbl", "MRS_T1_2023ann"):
             self.assertEqual(registry_client.row(readable_id)["processing_location"], str(project_dir_first))
+
+    def test_prepare_tcrmp_folder_does_not_follow_symlinks(self):
+        # A video_location reached through a symlink must place the folder
+        # beside the symlinked path as the operator sees it, not beside the
+        # real directory the link points to.
+        link_root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, link_root, True)
+        link_season = os.path.join(link_root, "2023_annual")
+        os.symlink(self.video_dir_a, link_season)
+        registry_client.update("MRS_T1_2023ann", video_location=link_season)
+
+        row = registry_client.row("MRS_T1_2023ann")
+        project_dir = run_phase1.prepare_tcrmp_folder(row)
+        self.assertEqual(project_dir.parent, Path(link_root))
+        self.assertFalse((Path(self.corpus_root_a) / project_dir.name).exists())
+
+    def test_prepare_tcrmp_folder_refuses_rootless_video_location(self):
+        # A video_location with no parent (filesystem root) cannot host a
+        # sibling folder; the error must name the row and the path.
+        registry_client.update("MRS_T1_2023ann", video_location="/")
+        row = registry_client.row("MRS_T1_2023ann")
+        with self.assertRaises(RuntimeError) as ctx:
+            run_phase1.prepare_tcrmp_folder(row)
+        self.assertIn("MRS_T1_2023ann", str(ctx.exception))
+        self.assertIn("no parent", str(ctx.exception))
 
     # -- ensure_project_ready / venv setup on the TCRMP path -------------
 

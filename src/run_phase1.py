@@ -7,9 +7,10 @@ Two modes:
   TCRMP (default, --tcrmp): rows come from the shared TCRMP 3D registry
   (vicarius/_METADATA/3d), selected by --ids / --site+--transect / or, with
   none of those given, every pending timepoint. Each timepoint's processing
-  folder lives NEXT TO its own video (never copied, never symlinked); all
-  timepoints of the same site+transect share one folder and one growing
-  psx, so the folder is only created once (next to whichever video is
+  folder lives as a SIBLING of its video's folder (never inside it; the
+  video is never copied, never symlinked); all timepoints of the same
+  site+transect share one folder and one growing psx, so the folder is
+  only created once (beside the video folder of whichever timepoint is
   processed first) and every later timepoint reuses it.
 
   Plain (--no-tcrmp): the original --input/--project pair, minus copying.
@@ -596,7 +597,7 @@ def _link_output(vicarius_run_dir: Path, name: str, target: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# TCRMP mode: registry-driven, processing folder next to the video
+# TCRMP mode: registry-driven, processing folder beside the video's folder
 # ---------------------------------------------------------------------------
 
 
@@ -618,16 +619,24 @@ def _earliest_date_for(site: str, transect: str) -> str:
 
 
 def prepare_tcrmp_folder(row: dict) -> Path:
-    """Ensure the processing folder for a TCRMP registry row exists next to
-    its video, has a ready .venv, and has its location recorded back into
-    the registry - all before step 0 runs. Returns the project directory.
+    """Ensure the processing folder for a TCRMP registry row exists as a
+    SIBLING of its video's folder, has a ready .venv, and has its location
+    recorded back into the registry - all before step 0 runs. Returns the
+    project directory.
+
+    Placement rule: the folder is created beside the folder that holds the
+    video (video_location's parent), never inside it, so video folders and
+    processing folders stay cleanly separated. When a transect's season
+    folders (2023_annual/, 2024_pbl/, ...) share one parent, every
+    timepoint resolves to the same spot beside them.
 
     All timepoints of the same site+transect share one processing folder
     and one growing psx: if any row of that site/transect already has a
-    processing_location, this reuses it (even if it differs from THIS row's
-    own video_location); a new folder is only created, next to THIS row's
-    video, when no row of that site/transect has one yet - named for the
-    earliest known timepoint regardless of processing order. venv setup
+    processing_location, this reuses it (even if THIS row's video sits
+    under a different parent); a new folder is only created, beside THIS
+    row's video folder, when no row of that site/transect has one yet -
+    named for the earliest known timepoint regardless of processing
+    order. venv setup
     (ensure_project_ready) is per-folder, not per-row, so a shared folder
     only pays for it once even when several timepoints are processed in the
     same run.
@@ -649,10 +658,25 @@ def prepare_tcrmp_folder(row: dict) -> Path:
     else:
         earliest_date = _earliest_date_for(site, transect)
         folder_name = _naming3d().processing_folder_name(site, transect, earliest_date)
-        project_dir = Path(video_location) / folder_name
+        # abspath, not resolve(): normalize without following symlinks, so
+        # the folder is placed beside the video folder as the operator sees
+        # it (consistent with step0's abspath comparisons).
+        video_dir = Path(os.path.abspath(video_location))
+        if video_dir.parent == video_dir:
+            raise RuntimeError(
+                f"{readable_id}: video_location {video_location!r} has no parent "
+                "directory to place the processing folder beside it"
+            )
+        project_dir = video_dir.parent / folder_name
 
-    for sub in ("console", "frames", "reports"):
-        (project_dir / sub).mkdir(parents=True, exist_ok=True)
+    try:
+        for sub in ("console", "frames", "reports"):
+            (project_dir / sub).mkdir(parents=True, exist_ok=True)
+    except PermissionError as exc:
+        raise RuntimeError(
+            f"{readable_id}: cannot create processing folder {project_dir} "
+            f"(is the directory above the video folder writable?): {exc}"
+        ) from exc
 
     params_dst = project_dir / "analysis_params.yaml"
     if not params_dst.exists():
@@ -1138,7 +1162,7 @@ def main():
     parser.add_argument(
         "--tcrmp", dest="tcrmp", action="store_true", default=True,
         help="Registry-driven mode (default): select TCRMP timepoints from the shared "
-        "3D registry and process each next to its own video. No --input/--project needed.",
+        "3D registry and process each in a folder beside its video's folder. No --input/--project needed.",
     )
     parser.add_argument(
         "--no-tcrmp", dest="tcrmp", action="store_false",

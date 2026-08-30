@@ -60,7 +60,8 @@ parameters:
     analysis_path: "processing.tcrmp"
     description: >-
       Registry-driven mode (default): select timepoints from the shared TCRMP
-      3D registry and process each next to its own video, appending into one
+      3D registry and process each in a folder beside its own video's folder,
+      appending into one
       psx per site and transect. Turn off to process a plain input/project
       pair by original file name instead (no registry, no NAS video lookup).
 
@@ -188,8 +189,8 @@ cli:
     skip_vim_flag: "--skip-vim"
     # param_flag carries the params_writethrough values on the command line
     # when the launch has no project directory to write into (the TCRMP case:
-    # each timepoint's processing folder is minted mid-run next to its own
-    # video). The runner emits one `--param <analysis_path>=<value>` pair per
+    # each timepoint's processing folder is minted mid-run beside its own
+    # video's folder). The runner emits one `--param <analysis_path>=<value>` pair per
     # parameter below that carries an `analysis_path` and has a value, and
     # run_phase1.py applies each into the folder's analysis_params.yaml before
     # step 0 reads it. Without this key the runner sends no such pairs, so a
@@ -254,8 +255,8 @@ ui:
   output_label: "Project workspace directory (non-TCRMP mode only)"
   output_help: |
     Non-TCRMP mode only (see the tcrmp parameter above); TCRMP mode leaves
-    this blank and derives one project directory per timepoint next to its
-    own video. Will be created if it does not exist. This is the workspace
+    this blank and derives one project directory per timepoint beside its
+    own video's folder. Will be created if it does not exist. This is the workspace
     that Phase 1 populates: frames/{MODEL_ID}/, reports/, console/, .venv/,
     analysis_params.yaml, status.csv, and the psx bundle at the top level.
     Phase 2 takes this same directory as its input. Not an "output dir" in

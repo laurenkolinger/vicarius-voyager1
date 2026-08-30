@@ -105,8 +105,9 @@ PROJECT_ID = PROJECT_NAME # Use the derived name as the ID
 
 # --- Directory Definitions (Derived from PROJECT_DIR) ---
 # Flat processing-folder layout: the project directory IS the processing
-# folder (it sits next to the source videos). No processing/, output/, or
-# video_source/ subtree. The psx bundle lives at the project root.
+# folder (a sibling of the folder that holds the source videos, never inside
+# it). No processing/, output/, or video_source/ subtree. The psx bundle
+# lives at the project root.
 BASE_DIRECTORY = PROJECT_DIR
 
 # Define standard subdirectories relative to the project
