@@ -7,7 +7,7 @@
 name: "3D_phase_1"
 display_name: "3D Phase 1"
 tags: ["3D"]
-version: "1.0.0"
+version: "1.1.0"
 description: "Default first-step 3D processing for TCRMP transect video: frame extraction, alignment with capped tie-point filtering, automatic scaling, DEM, and a single delivery mesh per timepoint, driven by the TCRMP 3D registry and appending timepoints into one psx per site and transect. Non-TCRMP inputs use original names and the same processing."
 author: "Lauren K Olinger"
 created: "2026-02-13"
@@ -114,6 +114,20 @@ parameters:
     default: true
     analysis_path: "processing.use_gpu"
     description: "Enable GPU acceleration for Metashape processing"
+
+  - name: "min_free_disk_gb"
+    type: "integer"
+    default: 200
+    analysis_path: "processing.min_free_disk_gb"
+    description: >-
+      Last-line disk guard. Before a timepoint's frame extraction and again
+      before its Metashape build, the run checks how many GB are free on the
+      drive that holds the processing folder; below this number the timepoint
+      is skipped (marked failed with the reason) and the run continues with
+      the rest. The sync driver is expected to manage space; this failsafe
+      only keeps a run from filling the drive completely, because a full
+      drive usually forces restarting the whole project. Set 0 to turn the
+      check off.
 
   - name: "scale_error_threshold"
     type: "float"

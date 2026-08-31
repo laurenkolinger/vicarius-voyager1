@@ -33,6 +33,7 @@ Usage:
 """
 
 import argparse
+import fcntl
 import json
 import logging
 import os
@@ -42,6 +43,8 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+
+import yaml
 
 import registry_client
 import status_rows
@@ -372,6 +375,201 @@ def _set_force_rerun(project_dir: Path, on: bool) -> None:
     set_params_path(params_path, "processing.force_rerun", "true" if on else "false")
 
 
+# Longest note this driver writes into the registry's operator-owned notes
+# column (matches step0/step1's cap).
+NOTE_MAX_CHARS = 500
+
+
+def registry_note(readable_id: str, text: str) -> None:
+    """Append a note to the registry row without discarding what the operator
+    wrote there (notes is an operator-owned column). Idempotent: a note
+    already present is not repeated, and the column is capped so repeated
+    reruns cannot grow it without bound. No-op outside TCRMP mode. Same
+    contract as step0/step1's registry_note.
+    """
+    if not registry_client.enabled():
+        return
+    existing = (registry_client.row(readable_id) or {}).get("notes", "") or ""
+    if text in existing:
+        return
+    combined = f"{existing}; {text}" if existing else text
+    if len(combined) > NOTE_MAX_CHARS:
+        combined = combined[-NOTE_MAX_CHARS:]
+    registry_client.update(readable_id, notes=combined)
+
+
+def processing_lock_held(processing_location) -> bool:
+    """True when some process currently holds the flock on
+    <processing_location>/.processing.lock, i.e. a step is really running in
+    that folder right now.
+
+    Probes without ever creating the lock file and without blocking. A
+    missing location or missing lock file means nothing is running there. A
+    hard-killed run leaves the file behind with the flock already released
+    by the OS, so the file merely existing never counts as held: only a
+    currently held flock does (stage active + lock held = RUNNING; stage
+    active + lock free = INTERRUPTED).
+    """
+    if not processing_location:
+        return False
+    lock_path = os.path.join(str(processing_location), ".processing.lock")
+    try:
+        fp = open(lock_path, "r")
+    except OSError:
+        return False
+    try:
+        try:
+            fcntl.flock(fp.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        except OSError:
+            return False
+        fcntl.flock(fp.fileno(), fcntl.LOCK_UN)
+        return False
+    finally:
+        fp.close()
+
+
+def acquire_processing_lock(project_dir):
+    """Hold <project_dir>/.processing.lock for the prepare-and-extract window.
+
+    step1.py takes this same exclusive flock for the Metashape build, but
+    nothing held it during folder preparation and frame extraction, so for
+    that whole window (minutes to over an hour) an actively running
+    timepoint read as interrupted: the atlas would have allowed edits and a
+    concurrent driver would not have skipped it. This closes that window:
+    the driver holds the lock from right after the folder exists until just
+    before step 1 launches (step 1, a separate process, takes its own).
+
+    Non-blocking, with two quick retries so a liveness probe touching the
+    lock at the same moment can never fail the acquisition. Returns the open
+    file object (closing it releases the lock), or None when another process
+    genuinely holds it. Mirrors step1.acquire_project_lock's stamp so a
+    blocked run can name the holder.
+    """
+    lock_path = os.path.join(str(project_dir), ".processing.lock")
+    lock_fp = open(lock_path, "a")
+    for attempt in range(3):
+        try:
+            fcntl.flock(lock_fp.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except BlockingIOError:
+            if attempt == 2:
+                lock_fp.close()
+                return None
+            time.sleep(0.2)
+    lock_fp.truncate(0)
+    lock_fp.write(
+        f"pid={os.getpid()} step=prepare+step0 "
+        f"host={os.uname().nodename} "
+        f"started={time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+    )
+    lock_fp.flush()
+    return lock_fp
+
+
+def release_processing_lock(lock_fp) -> None:
+    """Release a lock from acquire_processing_lock (safe on None)."""
+    if lock_fp is None:
+        return
+    try:
+        fcntl.flock(lock_fp.fileno(), fcntl.LOCK_UN)
+    except OSError:
+        pass
+    lock_fp.close()
+
+
+# ---------------------------------------------------------------------------
+# Disk-space failsafe
+# ---------------------------------------------------------------------------
+# A third-party sync driver is expected to manage space as the primary
+# mechanism; this is only the last line of defense so a step never starts on
+# a drive about to fill (a full drive mid-project usually forces restarting
+# the whole project). One statvfs call per check point, no polling, no
+# waiting, and a skipped timepoint never stalls the rest of the run.
+
+DEFAULT_MIN_FREE_DISK_GB = 200
+
+
+def read_min_free_disk_gb(project_dir: Path) -> float:
+    """The processing.min_free_disk_gb threshold for this project, read from
+    its analysis_params.yaml. Default 200 when the file or the key is missing
+    or unreadable; 0 disables the disk failsafe."""
+    params_path = Path(project_dir) / "analysis_params.yaml"
+    try:
+        params = yaml.safe_load(params_path.read_text()) or {}
+        value = (params.get("processing") or {}).get(
+            "min_free_disk_gb", DEFAULT_MIN_FREE_DISK_GB
+        )
+        return float(value)
+    except Exception:
+        return float(DEFAULT_MIN_FREE_DISK_GB)
+
+
+def check_free_disk(project_dir: Path):
+    """Disk failsafe: a single os.statvfs call on the processing folder.
+
+    Returns None when there is enough free space (or the check is disabled
+    with processing.min_free_disk_gb 0), else the message describing the
+    shortfall. The caller decides what to do with the message (TCRMP mode
+    records it in the registry and skips the row; plain mode stops the run).
+    """
+    min_gb = read_min_free_disk_gb(project_dir)
+    if min_gb <= 0:
+        return None
+    try:
+        st = os.statvfs(str(project_dir))
+    except OSError as exc:
+        # An unreachable folder (unmounted drive, permissions) is exactly the
+        # situation the failsafe exists for: refuse to start rather than
+        # write into the void.
+        return f"cannot check free disk space for {project_dir}: {exc}"
+    free_gb = (st.f_bavail * st.f_frsize) / (1024 ** 3)
+    if free_gb >= min_gb:
+        return None
+    return (
+        f"not enough free disk space for {project_dir}: {free_gb:.1f} GB "
+        f"free, at least {min_gb:g} GB required (processing.min_free_disk_gb)"
+    )
+
+
+def _reconcile_stage_after_step1(readable_id: str) -> None:
+    """Never leave a finished row wearing an active stage word.
+
+    Step 1 normally ends a row at stage "done" (success) or "failed". But a
+    run can end with nothing for step 1 to do (for example a forced rerun of
+    a timepoint whose frames subfolder no longer exists): the registry then
+    keeps prepare's "starting" while step1_status stays "complete", and
+    because the lock is now free the atlas would badge the row interrupted
+    forever. When step 1 exits cleanly and the row reads complete but its
+    stage is still an active word, settle the stage to "done"."""
+    try:
+        row = registry_client.row(readable_id) or {}
+    except Exception:
+        return
+    stage = (row.get("stage") or "").strip()
+    if stage not in ("", "done", "failed") and row.get("step1_status") == "complete":
+        registry_client.stage(readable_id, 1, "done")
+
+
+def _skip_for_low_disk(readable_id: str, message: str) -> None:
+    """Console + registry record for a TCRMP timepoint the disk failsafe
+    skipped: the row is marked failed with the reason in its notes, and the
+    run moves on to the remaining timepoints."""
+    print(f"  {message}")
+    print(
+        f"  Skipping {readable_id} and continuing with the remaining "
+        "timepoints. Free space on the processing drive (or lower "
+        "processing.min_free_disk_gb) and run again."
+    )
+    registry_note(readable_id, message)
+    registry_client.stage(readable_id, 1, "failed")
+    # set_stage writes only step/stage/stage_started; without this, a
+    # previously interrupted row would keep step1_status "running" and the
+    # next run would wrongly try to resume a row that failed on disk space.
+    registry_client.update(readable_id, step1_status="failed")
+
+
 def detect_metashape(assume_yes: bool = False) -> str:
     """Find the Metashape executable. Returns path or raises RuntimeError.
 
@@ -684,8 +882,13 @@ def prepare_tcrmp_folder(row: dict) -> Path:
         print(f"    Copied analysis_params.yaml to {project_dir}")
     set_params_path(params_dst, "processing.tcrmp", "true")
 
+    # protect_operator keeps any value a person or the sync driver already
+    # put in an operator cell (processing_location is one): the module fills
+    # blanks and otherwise leaves the operator's word alone, which is the
+    # contract STEP2_HANDOFF holds step 2 to as well.
     registry_client.update(
         readable_id,
+        protect_operator=True,
         processing_folder=project_dir.name,
         processing_location=str(project_dir),
         console_log=str(project_dir / "console"),
@@ -791,31 +994,104 @@ def run_tcrmp_mode(args, metashape_path: str) -> None:
 
     opened_params_for = set()
     processed_dirs = []
+    disk_failed = []
     try:
         for row in rows:
             readable_id = row["readable_id"]
             banner(f"TIMEPOINT: {readable_id}")
+
+            pending_resume_note = None
+            if row.get("step1_status") == "running":
+                # The registry thinks this row is mid-run. The flock on the
+                # processing folder tells the truth: held means another
+                # process really is working there (skip, never queue behind
+                # it); free means the previous run was hard-killed and this
+                # run resumes it from the latest stopping point.
+                if processing_lock_held(row.get("processing_location")):
+                    print(
+                        f"  Skipping {readable_id}: another process is working "
+                        "on this timepoint right now (its processing folder's "
+                        "lock is held). This run will not wait for it; run "
+                        "again later if the timepoint still needs processing."
+                    )
+                    continue
+                stage = row.get("stage") or "unknown stage"
+                stage_started = row.get("stage_started") or "unknown time"
+                print(
+                    f"  {readable_id}: the previous run was interrupted "
+                    f"(stopped during {stage}, {stage_started}) and its lock "
+                    "is free. Resuming; finished work is kept and processing "
+                    "continues from the latest stopping point."
+                )
+                # Recorded only once processing actually starts (after the
+                # disk check), so the registry never says "resumed" about a
+                # run that was skipped before doing anything.
+                pending_resume_note = (
+                    f"resumed after interrupted run (stopped during {stage}, {stage_started})"
+                )
+
             project_dir = prepare_tcrmp_folder(row)
-            apply_param_overrides(project_dir, getattr(args, "param_pairs", None))
-            print(f"  Processing folder: {project_dir}")
-            _link_output(vicarius_run_dir, readable_id, project_dir)
 
-            if not args.skip_vim and project_dir not in opened_params_for:
-                open_params_for_editing(project_dir)
-            opened_params_for.add(project_dir)
+            # Hold the processing lock from here until step 1 launches, so
+            # the whole prepare-and-extract window reads as RUNNING to the
+            # atlas and to any concurrent driver (step 1 takes its own lock
+            # in its own process).
+            proc_lock = acquire_processing_lock(project_dir)
+            if proc_lock is None:
+                print(
+                    f"  Skipping {readable_id}: another process is working "
+                    "on this timepoint right now (its processing folder's "
+                    "lock is held)."
+                )
+                continue
+            try:
+                apply_param_overrides(project_dir, getattr(args, "param_pairs", None))
+                print(f"  Processing folder: {project_dir}")
+                _link_output(vicarius_run_dir, readable_id, project_dir)
 
-            run_step0(project_dir)
-            if getattr(args, "force", False):
-                # select_rows let this row through on step1_status alone;
-                # step1.py skips on its own status.csv cell, so clear that
-                # too or the forced rerun would do nothing.
-                status_rows.reset_step1(project_dir, readable_id)
-                print(f"  --force: cleared the step 1 verdict for {readable_id} in status.csv")
-            _set_force_rerun(project_dir, bool(getattr(args, "force", False)))
+                if not getattr(args, "force", False):
+                    # A hard-killed --force run never reaches the finally that
+                    # clears processing.force_rerun, so a stale true could make
+                    # this normal run rebuild a manually edited chunk. Pin it
+                    # false at the start of every non-force timepoint.
+                    _set_force_rerun(project_dir, False)
+
+                if not args.skip_vim and project_dir not in opened_params_for:
+                    open_params_for_editing(project_dir)
+                opened_params_for.add(project_dir)
+
+                free_message = check_free_disk(project_dir)
+                if free_message:
+                    _skip_for_low_disk(readable_id, free_message)
+                    disk_failed.append(readable_id)
+                    continue
+
+                if pending_resume_note:
+                    registry_note(readable_id, pending_resume_note)
+
+                run_step0(project_dir)
+                if getattr(args, "force", False):
+                    # select_rows let this row through on step1_status alone;
+                    # step1.py skips on its own status.csv cell, so clear that
+                    # too or the forced rerun would do nothing.
+                    status_rows.reset_step1(project_dir, readable_id)
+                    print(f"  --force: cleared the step 1 verdict for {readable_id} in status.csv")
+
+                free_message = check_free_disk(project_dir)
+                if free_message:
+                    _skip_for_low_disk(readable_id, free_message)
+                    disk_failed.append(readable_id)
+                    continue
+
+                _set_force_rerun(project_dir, bool(getattr(args, "force", False)))
+            finally:
+                release_processing_lock(proc_lock)
+
             try:
                 run_step1(project_dir, metashape_path)
             finally:
                 _set_force_rerun(project_dir, False)
+            _reconcile_stage_after_step1(readable_id)
             print_manual_instructions(project_dir)
             processed_dirs.append(project_dir)
 
@@ -865,13 +1141,19 @@ def run_tcrmp_mode(args, metashape_path: str) -> None:
     if VICARIUS_LOGGING and start_event:
         try:
             log = get_log()
+            run_notes = f"Processed {len(processed_dirs)} TCRMP timepoint(s)"
+            if disk_failed:
+                run_notes += (
+                    f"; skipped {len(disk_failed)} for low disk space: "
+                    + ", ".join(disk_failed)
+                )
             log.process_end(
                 module=MODULE_NAME,
-                status="success",
+                status="failed" if disk_failed else "success",
                 duration_sec=elapsed,
                 outputs=[str(p) for p in processed_dirs],
                 parent_event_id=start_event,
-                notes=f"Processed {len(processed_dirs)} TCRMP timepoint(s)",
+                notes=run_notes,
             )
         except Exception:
             pass
@@ -882,6 +1164,15 @@ def run_tcrmp_mode(args, metashape_path: str) -> None:
     else:
         minutes = elapsed / 60
         print(f"\n  Total runtime: {minutes:.1f} minutes")
+
+    if disk_failed:
+        print(
+            f"\n  {len(disk_failed)} timepoint(s) were skipped because the "
+            f"processing drive is low on space: {', '.join(disk_failed)}. "
+            "Free disk space (or lower processing.min_free_disk_gb) and run "
+            "again to process them."
+        )
+        sys.exit(1)
 
 
 # ---------------------------------------------------------------------------
@@ -1079,8 +1370,38 @@ def run_non_tcrmp_mode(args, metashape_path: str) -> None:
         open_params_for_editing(project_dir)
 
     try:
-        if input_type == "video":
-            run_step0(project_dir)
+        if not getattr(args, "force", False):
+            # A hard-killed --force run never reaches the finally that clears
+            # processing.force_rerun, so a stale true could make this normal
+            # run rebuild a manually edited chunk. Pin it false at the start.
+            _set_force_rerun(project_dir, False)
+
+        # Same lock window as the TCRMP loop: held through extraction,
+        # released before step 1 (which takes its own in its own process).
+        proc_lock = acquire_processing_lock(project_dir)
+        if proc_lock is None:
+            raise RuntimeError(
+                "Another process is working in this project folder right now "
+                "(its .processing.lock is held). Run again once it finishes."
+            )
+        try:
+            if input_type == "video":
+                free_message = check_free_disk(project_dir)
+                if free_message:
+                    raise RuntimeError(
+                        f"{free_message}. Free disk space (or lower "
+                        "processing.min_free_disk_gb) and run again."
+                    )
+                run_step0(project_dir)
+
+            free_message = check_free_disk(project_dir)
+            if free_message:
+                raise RuntimeError(
+                    f"{free_message}. Free disk space (or lower "
+                    "processing.min_free_disk_gb) and run again."
+                )
+        finally:
+            release_processing_lock(proc_lock)
 
         _set_force_rerun(project_dir, bool(getattr(args, "force", False)))
         try:

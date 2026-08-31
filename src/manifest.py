@@ -11,7 +11,7 @@ import logging
 import os
 from datetime import datetime
 
-MODULE_VERSION = "1.0.0"
+MODULE_VERSION = "1.1.0"
 HEADERS = ["timestamp", "module_version", "project", "model_id",
            "artifact", "action", "path", "details"]
 

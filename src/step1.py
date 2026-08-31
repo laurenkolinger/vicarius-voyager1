@@ -32,6 +32,7 @@ import datetime
 import math
 import re
 import sys
+import time
 import traceback
 import fcntl
 import shutil
@@ -414,6 +415,44 @@ def now_stamp():
     return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _progress_logger(label, min_interval_s=30):
+    """A throttled progress callback for Metashape's long build calls.
+
+    Returns callback(pct) that logs "<label>: <pct rounded>%" at INFO level
+    at most once per min_interval_s (measured on time.monotonic, so a system
+    clock change cannot mute or flood it), plus exactly once more when pct
+    reaches 100 so every operation's log visibly ends. The first call always
+    logs, so the tailed log shows the operation the moment it starts moving.
+
+    The callback runs inside Metashape's C++ task loop, where a raised
+    exception can abort the whole build, so it swallows every exception:
+    worst case a progress line is lost, never the reconstruction.
+    """
+    state = {"last": None, "logged_done": False}
+
+    def callback(pct):
+        try:
+            if pct >= 100:
+                if state["logged_done"]:
+                    return
+                state["logged_done"] = True
+                state["last"] = time.monotonic()
+                logging.info(f"{label}: 100%")
+                return
+            now = time.monotonic()
+            if state["last"] is not None and (now - state["last"]) < min_interval_s:
+                return
+            state["last"] = now
+            # Clamp to 99 so "100%" only ever comes from the terminal branch
+            # above (a pct like 99.6 would otherwise round up and print 100%
+            # twice).
+            logging.info(f"{label}: {min(round(pct), 99)}%")
+        except Exception:
+            pass
+
+    return callback
+
+
 # --- registry write-back ----------------------------------------------------
 
 
@@ -576,9 +615,20 @@ def acquire_project_lock(step_name):
     """
     lock_path = os.path.join(DIRECTORIES["base"], ".processing.lock")
     lock_fp = open(lock_path, "w")
-    try:
-        fcntl.flock(lock_fp.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
+    # A registry/atlas liveness probe briefly touches this lock with a shared
+    # flock; a couple of quick retries make sure a probe in flight can never
+    # abort a legitimate launch. A real holder keeps its exclusive lock for
+    # the whole run, so retries never get past one.
+    acquired = False
+    for attempt in range(3):
+        try:
+            fcntl.flock(lock_fp.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            acquired = True
+            break
+        except BlockingIOError:
+            if attempt < 2:
+                time.sleep(0.2)
+    if not acquired:
         lock_fp.close()
         try:
             with open(lock_path, "r") as f:
@@ -837,16 +887,24 @@ def process_transect(transect_id, chunk, doc, psx_path):
             tiepoint_limit=METASHAPE_DEFAULTS["tiepoint_limit"],
             generic_preselection=METASHAPE_DEFAULTS["generic_preselection"],
             reference_preselection=METASHAPE_DEFAULTS["reference_preselection"],
-            filter_stationary_points=METASHAPE_DEFAULTS["filter_stationary_points"]
+            filter_stationary_points=METASHAPE_DEFAULTS["filter_stationary_points"],
+            progress=_progress_logger(f"Matching photos for {transect_id}")
         )
+        logging.info(f"Aligning cameras for model {transect_id}")
         registry_client.stage(transect_id, 1, "aligning")
-        chunk.alignCameras(adaptive_fitting=METASHAPE_DEFAULTS["adaptive_fitting"])
+        chunk.alignCameras(
+            adaptive_fitting=METASHAPE_DEFAULTS["adaptive_fitting"],
+            progress=_progress_logger(f"Aligning cameras for {transect_id}")
+        )
 
         # Attempt to align any unaligned cameras
         unaligned_cameras = [camera for camera in chunk.cameras if not camera.transform]
         for camera in unaligned_cameras:
             camera.transform = None
-        chunk.alignCameras(cameras=unaligned_cameras, reset_alignment=False)
+        chunk.alignCameras(
+            cameras=unaligned_cameras, reset_alignment=False,
+            progress=_progress_logger(f"Aligning remaining cameras for {transect_id}")
+        )
 
         # Fail clearly, right here, when alignment produced nothing to
         # filter (e.g. a degenerate video whose extracted frames are mostly
@@ -942,7 +1000,8 @@ def process_transect(transect_id, chunk, doc, psx_path):
             filter_mode=getattr(Metashape, METASHAPE_DEFAULTS["depth_filter_mode"]),
             reuse_depth=False,
             max_neighbors=METASHAPE_DEFAULTS.get("max_neighbors", 16),
-            subdivide_task=True  # Split into subtasks for better GPU utilization
+            subdivide_task=True,  # Split into subtasks for better GPU utilization
+            progress=_progress_logger(f"Building depth maps for {transect_id}")
         )
 
         # Build model
@@ -954,7 +1013,8 @@ def process_transect(transect_id, chunk, doc, psx_path):
             face_count=getattr(Metashape, METASHAPE_DEFAULTS["face_count"]),
             interpolation=getattr(Metashape, METASHAPE_DEFAULTS["interpolation"]),
             vertex_colors=METASHAPE_DEFAULTS["vertex_colors"],
-            subdivide_task=True  # Split into subtasks for better GPU utilization
+            subdivide_task=True,  # Split into subtasks for better GPU utilization
+            progress=_progress_logger(f"Building mesh for {transect_id}")
         )
 
         # Verify model exists. We raise here (rather than just logging)
@@ -1019,6 +1079,7 @@ def process_transect(transect_id, chunk, doc, psx_path):
             dem_kwargs = {
                 "source_data": Metashape.DepthMapsData,
                 "interpolation": Metashape.EnabledInterpolation,
+                "progress": _progress_logger(f"Building DEM for {transect_id}"),
             }
             dem_resolution = float(products_cfg.get("dem_resolution", 0))
             if dem_resolution > 0:
@@ -1035,6 +1096,7 @@ def process_transect(transect_id, chunk, doc, psx_path):
         # Delete depth maps (flow item 7): ~12 GB per chunk at full res and
         # nothing downstream needs them. Removal attribute per probe_results.
         if products_cfg.get("delete_depth_maps", True):
+            logging.info(f"Deleting depth maps for model {transect_id}")
             registry_client.stage(transect_id, 1, "delete_depth_maps")
             removed = False
             for attr in ("depth_maps_sets", "depth_maps"):
@@ -1108,6 +1170,7 @@ def process_transect(transect_id, chunk, doc, psx_path):
             mapping_mode=getattr(Metashape, METASHAPE_DEFAULTS["mapping_mode"]),
             texture_size=8192,
             page_count=page_count,
+            progress=_progress_logger(f"Building UV for {transect_id}"),
         )
 
         # Build texture
@@ -1132,7 +1195,8 @@ def process_transect(transect_id, chunk, doc, psx_path):
             texture_type=getattr(Metashape.Model, METASHAPE_DEFAULTS["texture_type"]),
             blending_mode=getattr(Metashape, METASHAPE_DEFAULTS["blending_mode"]),
             ghosting_filter=METASHAPE_DEFAULTS.get("ghosting_filter", True),
-            fill_holes=METASHAPE_DEFAULTS.get("fill_holes", True)
+            fill_holes=METASHAPE_DEFAULTS.get("fill_holes", True),
+            progress=_progress_logger(f"Building texture for {transect_id}")
         )
 
         if not enable_texture_gpu:
@@ -1335,6 +1399,7 @@ def process_model(transect_ids, psx_path):
             update_tracking(transect_id, {"PSX file": psx_path})
 
             # Create the step 1 report for this timepoint
+            logging.info(f"Generating step 1 report for {transect_id}")
             registry_client.stage(transect_id, 1, "report")
             try:
                 reports_dir = DIRECTORIES["reports"]
@@ -1362,6 +1427,7 @@ def process_model(transect_ids, psx_path):
             Metashape.app.update()
             doc.save(psx_path)
 
+            logging.info(f"Verifying saved chunk {transect_id} in {os.path.basename(psx_path)}")
             registry_client.stage(transect_id, 1, "verifying")
             if verify_psx_chunk(psx_path, transect_id):
                 update_tracking(transect_id, {

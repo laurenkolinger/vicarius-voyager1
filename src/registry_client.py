@@ -77,10 +77,16 @@ def stage(readable_id, step, stage):
     return _registry.set_stage(readable_id, step, stage, actor=ACTOR)
 
 
-def update(readable_id, **fields):
+def update(readable_id, protect_operator=False, **fields):
+    """Write fields into the registry row through the shared upsert.
+
+    protect_operator=True keeps any value the operator (a person or the
+    sync driver) already put in a cell.
+    """
     if not enabled():
         return None
-    return _registry.upsert(readable_id, fields, actor=ACTOR)
+    return _registry.upsert(readable_id, fields, actor=ACTOR,
+                            protect_operator=protect_operator)
 
 
 def snapshot(readable_id, folder, extra, report_pdf=None, params_yaml=None):

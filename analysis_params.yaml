@@ -13,6 +13,7 @@ processing:
   frames_per_transect: 1000 # frames step0 extracts per source video
   max_chunks_per_psx: 4 # chunks appended to one psx before a new range-named psx starts
   use_gpu: true # GPU acceleration for Metashape matching and alignment
+  min_free_disk_gb: 200 # last-line disk guard: a step is skipped when the drive holding the processing folder has fewer GB free than this; 0 turns the check off (the sync driver is expected to manage space)
 
   metashape:
     defaults:

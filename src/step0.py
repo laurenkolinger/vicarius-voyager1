@@ -118,7 +118,39 @@ def registry_failure(readable_id, message):
     registry_note(readable_id, message)
 
 
-def _run_ffmpeg(video_path, out_pattern, rate, start_number, hwaccel_args):
+# How often the extraction loop reports progress while ffmpeg runs, in
+# seconds. The report is one cheap directory listing per interval, so it
+# never slows the extraction itself.
+EXTRACT_PROGRESS_INTERVAL_S = 30
+
+
+def _extraction_progress(video_path, output_dir, existing_files):
+    """A callback that logs how many new frames this video has written so
+    far: "extracting <video name>: <N> frames written". Counting is one
+    os.listdir of the output directory; any error is swallowed so a progress
+    line can never take down the extraction."""
+    video_name = os.path.basename(video_path)
+
+    def report():
+        try:
+            written = sum(
+                1 for f in os.listdir(output_dir)
+                if f.endswith(".tiff") and f not in existing_files
+            )
+            logging.info(f"extracting {video_name}: {written} frames written")
+        except Exception:
+            pass
+
+    return report
+
+
+def _run_ffmpeg(video_path, out_pattern, rate, start_number, hwaccel_args,
+                progress_cb=None):
+    """Run one ffmpeg extraction. With progress_cb set, the wait is a
+    timeout loop that calls progress_cb about every
+    EXTRACT_PROGRESS_INTERVAL_S seconds while ffmpeg keeps working;
+    subprocess.communicate(timeout=...) leaves the child running and keeps
+    the partial pipe output, so the loop just retries until ffmpeg exits."""
     cmd = (
         ["ffmpeg"] + hwaccel_args + [
             "-i", video_path,
@@ -130,7 +162,19 @@ def _run_ffmpeg(video_path, out_pattern, rate, start_number, hwaccel_args):
             out_pattern,
         ]
     )
-    return subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if progress_cb is None:
+        return subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    while True:
+        try:
+            stdout, stderr = proc.communicate(timeout=EXTRACT_PROGRESS_INTERVAL_S)
+            return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
+        except subprocess.TimeoutExpired:
+            try:
+                progress_cb()
+            except Exception:
+                pass
 
 
 def extract_frames_for_part(video_path, output_dir, frames_for_part, duration_s, codec, start_number=1):
@@ -156,14 +200,17 @@ def extract_frames_for_part(video_path, output_dir, frames_for_part, duration_s,
     logging.info(f"Extracting {frames_for_part} frames from {video_path} (fps={rate:.6f})")
     print(f"Extracting {frames_for_part} 16-bit TIFF frames from {os.path.basename(video_path)} (fps={rate:.6f})...")
 
+    progress_cb = _extraction_progress(video_path, output_dir, existing_files)
     hw_args = videos.hwaccel_args(codec)
-    result = _run_ffmpeg(video_path, out_pattern, rate, start_number, hw_args)
+    result = _run_ffmpeg(video_path, out_pattern, rate, start_number, hw_args,
+                         progress_cb=progress_cb)
 
     if result.returncode != 0:
         stderr = (result.stderr or b"").decode(errors="replace").strip()
         logging.warning(f"Hardware-accelerated ffmpeg failed for {video_path}: {stderr[-1000:]}")
         print("Hardware-accelerated extraction failed, retrying with software decoding...")
-        result = _run_ffmpeg(video_path, out_pattern, rate, start_number, [])
+        result = _run_ffmpeg(video_path, out_pattern, rate, start_number, [],
+                             progress_cb=progress_cb)
         if result.returncode != 0:
             stderr2 = (result.stderr or b"").decode(errors="replace").strip()
             logging.error(f"Software ffmpeg extraction also failed for {video_path}: {stderr2[-1000:]}")
