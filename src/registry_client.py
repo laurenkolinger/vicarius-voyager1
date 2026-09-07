@@ -19,6 +19,10 @@ import sys
 
 ACTOR = "3D_phase_1"
 
+# The row_facts.csv section this module writes (registry.FACT_SECTIONS names
+# the writers; this one is the Voyager 1 reconstruction module).
+VOYAGER1_SECTION = "voyager1"
+
 _params = None
 _registry = None
 _naming3d = None
@@ -94,6 +98,33 @@ def snapshot(readable_id, folder, extra, report_pdf=None, params_yaml=None):
         return None
     return _registry.capture_snapshot(readable_id, folder, extra,
                                        report_pdf=report_pdf, params_yaml=params_yaml)
+
+
+def facts(readable_id, section, facts, links=None, units=None):
+    """Record facts for one row and section in the registry's row_facts.csv
+    sidecar through the shared set_facts, signed with this module's actor.
+
+    Parameters:
+        readable_id: an existing registry row.
+        section: one of registry.FACT_SECTIONS (VOYAGER1_SECTION here).
+        facts: {key: value}; the keys given replace their old lines, other
+            keys of the section stay.
+        links: {key: path or URL} the atlas renders as a link, or None.
+        units: {key: "" | "s" | "GB" | "count"}, or None.
+
+    Returns:
+        None outside TCRMP mode (nothing is written); otherwise True when
+        the sidecar changed, False when every key already matched.
+
+    Raises:
+        TypeError, ValueError, KeyError: from the shared validation (an
+        unknown section, a bad key or value, a link or unit for a key not
+        given, a row that does not exist); nothing is written then.
+    """
+    if not enabled():
+        return None
+    return _registry.set_facts(readable_id, section, facts, actor=ACTOR,
+                               links=links, units=units)
 
 
 def row(readable_id):

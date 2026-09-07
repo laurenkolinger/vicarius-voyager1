@@ -5,7 +5,7 @@
 # ==============================================================================
 
 name: "3D_phase_1"
-display_name: "3D Phase 1"
+display_name: "VOYAGER 1"    # V-fleet name per Lauren 2026-09-02 (was 3D Phase 1)
 tags: ["3D"]
 version: "1.1.0"
 description: "Default first-step 3D processing for TCRMP transect video: frame extraction, alignment with capped tie-point filtering, automatic scaling, DEM, and a single delivery mesh per timepoint, driven by the TCRMP 3D registry and appending timepoints into one psx per site and transect. Non-TCRMP inputs use original names and the same processing."
@@ -107,6 +107,10 @@ parameters:
     type: "integer"
     default: 4
     analysis_path: "processing.max_chunks_per_psx"
+    # hidden: the project structure controls the psx cap (one psx per site
+    # and transect); the Voyager 1 setup page never shows this key and the
+    # value travels from the chosen parameter version (spec 5.3).
+    hidden: true
     description: "Maximum chunks per PSX file for batch processing"
 
   - name: "use_gpu"
@@ -164,6 +168,40 @@ parameters:
       Target texel size in metres for scaled models. The texture page count
       at 8192 is computed from mesh area at this texel size; a 12 m2 transect
       resolves to one 8192 page. Unscaled models use 4 fixed pages.
+
+  # Run provenance set by the Voyager 1 setup page (spec 5.3 and 5.6). Hidden
+  # from the generic runner form: the setup page fills them, the runner
+  # forwards them through run_id_flag, params_version_flag and
+  # params_file_flag below, and run_phase1.py records the first two as
+  # voyager1 facts on every row it prepares. A blank value sends no flag.
+  - name: "run_id"
+    type: "string"
+    default: ""
+    hidden: true
+    description: >-
+      Run id of this launch, TCRMP_{day}{mon}{yy}_{initials}_{sites}_{min}-{max}
+      (for example TCRMP_3sep26_LO_MRS3_23ann-25pbl), minted by the Voyager 1
+      setup page and written as the voyager1 run_id fact on every row the run
+      prepares. Sent as --run-id.
+
+  - name: "params_version"
+    type: "string"
+    default: ""
+    hidden: true
+    description: >-
+      Version of the analysis parameters in the voyagerparams repository that
+      this run uses (for example v1.0.0, or the base version of a custom set),
+      written as the voyager1 params_version fact. Sent as --params-version.
+
+  - name: "params_file"
+    type: "string"
+    default: ""
+    hidden: true
+    description: >-
+      Absolute path of the parameter file this run copies into each processing
+      folder as analysis_params.yaml: a version, branch or custom/<run id>.yaml
+      file inside the voyagerparams checkout at
+      vicarius/modules/voyagerparams/github_repo. Sent as --params-file.
 
 # ------------------------------------------------------------------------------
 # RUNTIME REQUIREMENTS
@@ -232,6 +270,13 @@ cli:
     site_flag: "--site"
     transect_flag: "--transect"
     force_flag: "--force"
+    # Run provenance from the Voyager 1 setup page (spec 5.6): the three
+    # hidden string parameters above travel as these flags; run_phase1.py
+    # records run_id and params_version as voyager1 facts at folder
+    # preparation and copies params_file in as the folder's parameters.
+    run_id_flag: "--run-id"
+    params_version_flag: "--params-version"
+    params_file_flag: "--params-file"
 
 # ------------------------------------------------------------------------------
 # UI FIELD LABELS
@@ -242,6 +287,12 @@ cli:
 # interactive modules); they exist so the user knows which paths to have
 # ready when the script prompts for them in the stream console.
 ui:
+  # style: voyager1 -> the desktop tile opens the Voyager 1 setup window
+  #                    (vicarius_ui_os/voyager_views.py, GET /voyager1) with
+  #                    the atlas matrix embedded, instead of the generic
+  #                    runner form; that form stays reachable for one release
+  #                    at /modules/3D_phase_1?form=1 (spec 5.1).
+  style: "voyager1"
   # run_mode: terminal      -> only the "Run in terminal" launch is offered; the
   #                            in-page SSE run button is hidden (multi-hour
   #                            Metashape runs should not be tied to a browser tab).

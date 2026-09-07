@@ -76,6 +76,24 @@ MODULE_DIR = GITHUB_REPO_DIR.parent  # modules/<module_name>/
 MODULE_NAME = os.path.basename(MODULE_DIR)  # e.g. "3D_phase_1"; used for provenance/logging
 TEMPLATE_PARAMS = GITHUB_REPO_DIR / "analysis_params.yaml"
 
+# The manual edit checklist is one file with two readers: the manual edit
+# module's checklist popout and this runner's console print. The reader
+# (manualedit.checklist) lives in the manual edit module's clone.
+MANUAL_EDIT_REPO = Path(VICARIUS_ROOT) / "modules" / "manual_edit" / "github_repo"
+CHECKLIST_PATH = GITHUB_REPO_DIR / "manual_edit_checklist.yaml"
+
+# Run identity flags (--run-id, --params-version, --params-file), validated
+# at entry so a bad value is refused by the parser and never reaches a
+# processing folder. The run id grammar matches the Carousel's (letters,
+# digits, _ + -) plus the dot the voyagerparams custom set names allow; a
+# params version is a voyagerparams ref such as v1.2.0, branches/<slug>/v1.2.0
+# or custom/<run_id>, so it also allows a slash.
+RUN_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.+-]*")
+RUN_ID_MAX_CHARS = 128
+PARAMS_VERSION_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_./+-]*")
+PARAMS_VERSION_MAX_CHARS = 128
+PARAMS_FILE_MAX_BYTES = 16 * 1024 * 1024
+
 # Metashape detection paths (ordered)
 METASHAPE_SEARCH_PATHS = [
     "/home/bizon/applications/metashape-pro_2_2_2_amd64/metashape-pro/metashape",
@@ -373,6 +391,165 @@ def _set_force_rerun(project_dir: Path, on: bool) -> None:
     if not params_path.exists():
         return
     set_params_path(params_path, "processing.force_rerun", "true" if on else "false")
+
+
+# ---------------------------------------------------------------------------
+# Run identity flags: --run-id, --params-version, --params-file
+# ---------------------------------------------------------------------------
+
+
+def _validate_token(value, flag: str, pattern, max_chars: int, allowed: str):
+    """Shared check for --run-id and --params-version: None stays None; a
+    string must be non-blank, at most `max_chars` long, and match `pattern`
+    in full, surrounding whitespace included (a trailing newline is a sign
+    of a malformed launch, not something to trim). `allowed` names the
+    punctuation the pattern accepts, for the error message. Raises TypeError
+    for a non-string and ValueError (naming the flag) for anything else."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise TypeError(f"{flag} must be a string, got {type(value).__name__}")
+    if not value.strip():
+        raise ValueError(f"{flag} is blank")
+    if len(value) > max_chars:
+        raise ValueError(f"{flag} is longer than {max_chars} characters")
+    if not pattern.fullmatch(value):
+        raise ValueError(
+            f"{flag} must start with a letter or digit and hold only letters, "
+            f"digits and {allowed}; got {value!r}"
+        )
+    return value
+
+
+def validate_run_id(value):
+    """The run id written as a voyager1 fact (for example
+    TCRMP_3sep26_LO_MRS3_23ann-25pbl), or None when the flag was not given.
+    Raises ValueError naming --run-id for a blank, over-long or ill-formed id."""
+    return _validate_token(value, "--run-id", RUN_ID_PATTERN, RUN_ID_MAX_CHARS,
+                           "the characters _ . + -")
+
+
+def validate_params_version(value):
+    """The voyagerparams version ref written as a voyager1 fact (for example
+    v1.2.0 or branches/coral/v1.2.0), or None when the flag was not given.
+    Raises ValueError naming --params-version for a blank, over-long or
+    ill-formed ref."""
+    return _validate_token(value, "--params-version", PARAMS_VERSION_PATTERN,
+                           PARAMS_VERSION_MAX_CHARS, "the characters _ . / + -")
+
+
+def _read_params_file_text(path: Path) -> str:
+    """The text of a candidate parameter file, refused (ValueError naming
+    --params-file) when it is missing, a directory, empty, over the size cap,
+    unreadable, or not UTF-8."""
+    if not path.exists():
+        raise ValueError(f"--params-file {path} does not exist")
+    if path.is_dir():
+        raise ValueError(f"--params-file {path} is a directory, not a YAML file")
+    if not path.is_file():
+        raise ValueError(f"--params-file {path} is not a regular file")
+    size = path.stat().st_size
+    if size == 0:
+        raise ValueError(f"--params-file {path} is empty")
+    if size > PARAMS_FILE_MAX_BYTES:
+        raise ValueError(
+            f"--params-file {path} is larger than {PARAMS_FILE_MAX_BYTES} bytes "
+            f"({size} bytes); a parameter file is a few kilobytes"
+        )
+    try:
+        return path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"--params-file {path} is not UTF-8 text: {exc}") from exc
+    except OSError as exc:
+        raise ValueError(f"--params-file {path} cannot be read: {exc}") from exc
+
+
+def validate_params_file(value):
+    """The absolute path of a parameter file that can seed a new processing
+    folder's analysis_params.yaml, or None when the flag was not given.
+
+    The file must exist, be a regular UTF-8 file under PARAMS_FILE_MAX_BYTES,
+    parse as YAML, and hold a top-level mapping whose `processing` key is a
+    mapping (the block config.py reads). Raises TypeError for a value that
+    is not a path and ValueError naming --params-file for everything else.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, (str, os.PathLike)):
+        raise TypeError(f"--params-file must be a path, got {type(value).__name__}")
+    path = Path(os.path.abspath(Path(value).expanduser()))
+    text = _read_params_file_text(path)
+    try:
+        data = yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        raise ValueError(f"--params-file {path} is not valid YAML: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ValueError(
+            f"--params-file {path} must hold a mapping with a processing key at the top level"
+        )
+    if not isinstance(data.get("processing"), dict):
+        raise ValueError(
+            f"--params-file {path} has no processing mapping "
+            "(the block analysis_params.yaml keeps every reconstruction setting in)"
+        )
+    return path
+
+
+def seed_analysis_params(project_dir: Path, params_file=None):
+    """Create <project_dir>/analysis_params.yaml when it is missing, from
+    `params_file` (a validated --params-file) or else the module template.
+
+    Returns the source path that was copied, or None when the folder already
+    had the file (nothing is written then: a folder's parameters belong to
+    the folder once it exists, and the caller prints that the seed was
+    ignored). Raises RuntimeError naming both paths when the copy fails.
+    """
+    params_dst = Path(project_dir) / "analysis_params.yaml"
+    if params_dst.exists():
+        return None
+    source = Path(params_file) if params_file is not None else TEMPLATE_PARAMS
+    try:
+        shutil.copy2(str(source), str(params_dst))
+    except OSError as exc:
+        raise RuntimeError(
+            f"cannot seed {params_dst} from {source}: {exc}"
+        ) from exc
+    return source
+
+
+def seed_folder_params(project_dir: Path, params_file=None, indent: str = "    ") -> bool:
+    """seed_analysis_params plus the console line that says what happened:
+    where the new file came from, or that an existing file kept its place
+    and the --params-file was ignored for this folder. Returns True when the
+    file was created. Silent when the folder already had the file and no
+    seed was offered (the caller may say so in its own words)."""
+    seeded_from = seed_analysis_params(project_dir, params_file)
+    if seeded_from is not None:
+        origin = f" from {seeded_from}" if params_file is not None else ""
+        print(f"{indent}Copied analysis_params.yaml to {project_dir}{origin}")
+        return True
+    if params_file is not None:
+        print(
+            f"{indent}analysis_params.yaml already exists in {project_dir}; "
+            f"--params-file {params_file} ignored for this folder"
+        )
+    return False
+
+
+def record_run_facts(readable_id: str, run_id=None, params_version=None):
+    """Write the run identity (voyager1 facts run_id and params_version) for
+    one registry row, so the atlas can name the run and link its parameter
+    version. Only the values given are written; with neither, nothing is
+    written. Returns what registry_client.facts returns (None outside TCRMP
+    mode)."""
+    facts = {}
+    if run_id:
+        facts["run_id"] = run_id
+    if params_version:
+        facts["params_version"] = params_version
+    if not facts:
+        return None
+    return registry_client.facts(readable_id, registry_client.VOYAGER1_SECTION, facts)
 
 
 # Longest note this driver writes into the registry's operator-owned notes
@@ -733,8 +910,44 @@ def run_step1(project_dir: Path, metashape_path: str) -> None:
     print("\n  Step 1 complete.")
 
 
+def _checklist_console(project_dir: Path) -> str:
+    """The manual edit checklist rendered for the console by the manual edit
+    module's reader (manualedit.checklist in MANUAL_EDIT_REPO) from
+    CHECKLIST_PATH, the one file both readers share. Raises ImportError when
+    the reader is not installed, FileNotFoundError when the YAML is missing,
+    and ValueError (ChecklistError) when it is malformed."""
+    repo = str(MANUAL_EDIT_REPO)
+    if repo not in sys.path:
+        sys.path.append(repo)
+    from manualedit import checklist
+
+    return checklist.render_console(project_dir, path=CHECKLIST_PATH)
+
+
 def print_manual_instructions(project_dir: Path) -> None:
-    """Print instructions for the manual GUI step."""
+    """Print the manual edit checklist for the Metashape GUI step.
+
+    The text comes from manual_edit_checklist.yaml through the manual edit
+    module's reader, so the console and the checklist popout can never
+    drift apart. When that reader or the file is unavailable, a note says
+    so and the built-in copy of the same text is printed instead.
+    """
+    try:
+        text = _checklist_console(project_dir)
+    except (ImportError, OSError, ValueError) as exc:
+        reason = " ".join(str(exc).split())
+        print(
+            f"  Note: the shared manual edit checklist could not be read "
+            f"({reason}); printing the built-in copy."
+        )
+        _print_builtin_manual_instructions(project_dir)
+        return
+    print(text, end="")
+
+
+def _print_builtin_manual_instructions(project_dir: Path) -> None:
+    """The checklist text as this runner printed it before the shared YAML
+    existed; the fallback when the shared reader is unavailable."""
     banner("PHASE 1 COMPLETE - MANUAL STEP REQUIRED")
     print()
     print("  Before running Phase 2, you must manually straighten and prepare")
@@ -816,11 +1029,17 @@ def _earliest_date_for(site: str, transect: str) -> str:
     return min(dates)
 
 
-def prepare_tcrmp_folder(row: dict) -> Path:
+def prepare_tcrmp_folder(row: dict, run_id=None, params_version=None, params_file=None) -> Path:
     """Ensure the processing folder for a TCRMP registry row exists as a
     SIBLING of its video's folder, has a ready .venv, and has its location
     recorded back into the registry - all before step 0 runs. Returns the
     project directory.
+
+    `run_id` and `params_version` (the validated --run-id and
+    --params-version) are written as voyager1 facts for the row. `params_file`
+    (the validated --params-file) seeds a folder created here in place of
+    the module template; a folder that already has analysis_params.yaml
+    keeps it and a printed note says the file was ignored.
 
     Placement rule: the folder is created beside the folder that holds the
     video (video_location's parent), never inside it, so video folders and
@@ -877,9 +1096,7 @@ def prepare_tcrmp_folder(row: dict) -> Path:
         ) from exc
 
     params_dst = project_dir / "analysis_params.yaml"
-    if not params_dst.exists():
-        shutil.copy2(str(TEMPLATE_PARAMS), str(params_dst))
-        print(f"    Copied analysis_params.yaml to {project_dir}")
+    seed_folder_params(project_dir, params_file)
     set_params_path(params_dst, "processing.tcrmp", "true")
 
     # protect_operator keeps any value a person or the sync driver already
@@ -894,6 +1111,7 @@ def prepare_tcrmp_folder(row: dict) -> Path:
         console_log=str(project_dir / "console"),
     )
     registry_client.stage(readable_id, 1, "starting")
+    record_run_facts(readable_id, run_id, params_version)
 
     status_rows.write_identity_row(project_dir, row.get("original_videos", ""), readable_id)
 
@@ -1030,7 +1248,12 @@ def run_tcrmp_mode(args, metashape_path: str) -> None:
                     f"resumed after interrupted run (stopped during {stage}, {stage_started})"
                 )
 
-            project_dir = prepare_tcrmp_folder(row)
+            project_dir = prepare_tcrmp_folder(
+                row,
+                run_id=getattr(args, "run_id", None),
+                params_version=getattr(args, "params_version", None),
+                params_file=getattr(args, "params_file", None),
+            )
 
             # Hold the processing lock from here until step 1 launches, so
             # the whole prepare-and-extract window reads as RUNNING to the
@@ -1250,12 +1473,15 @@ def collect_input_ids(input_path: Path, input_type: str) -> dict:
     }
 
 
-def setup_project(project_dir: Path, input_path: Path, input_type: str, ids: dict) -> None:
+def setup_project(project_dir: Path, input_path: Path, input_type: str, ids: dict,
+                  params_file=None) -> None:
     """Create the project workspace. Frame-folder input is symlinked
     (read-only) into frames/; video input is read in place from
     input_path - nothing is copied or linked into the project for video
     input, so step0 (Task 10) reads processing.video_input_dir from
-    analysis_params.yaml to find the source videos.
+    analysis_params.yaml to find the source videos. `params_file` (the
+    validated --params-file) seeds a new project's analysis_params.yaml in
+    place of the module template; an existing file is kept as before.
     """
     banner("PROJECT SETUP")
 
@@ -1267,10 +1493,7 @@ def setup_project(project_dir: Path, input_path: Path, input_type: str, ids: dic
     create_venv(project_dir)
 
     params_dst = project_dir / "analysis_params.yaml"
-    if not params_dst.exists():
-        shutil.copy2(str(TEMPLATE_PARAMS), str(params_dst))
-        print(f"  Copied analysis_params.yaml to {project_dir}")
-    else:
+    if not seed_folder_params(project_dir, params_file, indent="  ") and params_file is None:
         print("  analysis_params.yaml already exists, keeping existing.")
     set_params_path(params_dst, "processing.tcrmp", "false")
 
@@ -1354,7 +1577,8 @@ def run_non_tcrmp_mode(args, metashape_path: str) -> None:
     _confirm_proceed(args)
 
     try:
-        setup_project(project_dir, input_path, input_type, ids)
+        setup_project(project_dir, input_path, input_type, ids,
+                      params_file=getattr(args, "params_file", None))
         apply_param_overrides(project_dir, getattr(args, "param_pairs", None))
     except Exception as e:
         print(f"\nError during project setup: {e}")
@@ -1476,7 +1700,9 @@ def run_non_tcrmp_mode(args, metashape_path: str) -> None:
         print(f"\n  Total runtime: {minutes:.1f} minutes")
 
 
-def main():
+def build_parser() -> argparse.ArgumentParser:
+    """The command-line parser: every flag the VICARIUS runner's flag_map
+    emits, plus the run identity flags the Voyager 1 setup page sends."""
     parser = argparse.ArgumentParser(
         description="3D Phase 1: Setup + Frame Extraction + Initial 3D Processing"
     )
@@ -1543,11 +1769,46 @@ def main():
         "how the VICARIUS UI form reaches a TCRMP run, whose processing folder does "
         "not exist yet at launch.",
     )
-    args = parser.parse_args()
+    parser.add_argument(
+        "--run-id", dest="run_id", type=str, default=None,
+        help="TCRMP mode: the run id the Voyager 1 setup page minted (for example "
+        "TCRMP_3sep26_LO_MRS3_23ann-25pbl), recorded as a voyager1 fact on every "
+        "selected registry row so the atlas can name the run.",
+    )
+    parser.add_argument(
+        "--params-version", dest="params_version", type=str, default=None,
+        help="TCRMP mode: the voyagerparams version the parameters came from (for "
+        "example v1.2.0 or custom/<run id>), recorded as a voyager1 fact beside the run id.",
+    )
+    parser.add_argument(
+        "--params-file", dest="params_file", type=str, default=None,
+        metavar="PATH",
+        help="Seed a NEW processing folder's analysis_params.yaml from this YAML file "
+        "instead of the module template. The file must exist and hold a processing "
+        "mapping. A folder that already has analysis_params.yaml keeps it and the "
+        "file is ignored with a printed note; --param overrides apply either way.",
+    )
+    return parser
+
+
+def finalize_args(parser: argparse.ArgumentParser, args) -> None:
+    """Parse the --param pairs and validate the run identity flags in place,
+    turning any ValueError into a parser error (exit 2) before any work."""
     try:
         args.param_pairs = parse_param_pairs(args.param)
+        args.run_id = validate_run_id(args.run_id)
+        args.params_version = validate_params_version(args.params_version)
+        args.params_file = validate_params_file(args.params_file)
     except ValueError as exc:
         parser.error(str(exc))
+
+
+def main():
+    """Parse and validate the command line, find Metashape, then run the
+    TCRMP (registry) mode or the plain --input/--project mode."""
+    parser = build_parser()
+    args = parser.parse_args()
+    finalize_args(parser, args)
 
     print("\nDetecting Metashape installation...")
     metashape_path = detect_metashape(args.yes)

@@ -524,6 +524,26 @@ def registry_failure(transect_id, message):
     registry_note(transect_id, message)
 
 
+def record_step1_facts(transect_id, facts):
+    """Write the step 1 facts the atlas drop-down links to into the registry's
+    row_facts.csv (section voyager1): the report PDF path when the report
+    was generated, and this step's console log path, both as links. Called
+    only from registry_success, so TCRMP mode is already established. A
+    failure to write the facts is logged and never undoes the completed row.
+    """
+    log_path = step_log_path("step1")
+    values = {"console_log_step1": log_path}
+    links = {"console_log_step1": log_path}
+    report = facts.get("report_file") or ""
+    if report:
+        values["step1_report"] = report
+        links["step1_report"] = report
+    try:
+        registry_client.facts(transect_id, registry_client.VOYAGER1_SECTION, values, links=links)
+    except Exception as exc:
+        logging.warning(f"Could not record the step 1 facts for {transect_id}: {exc}")
+
+
 def registry_success(transect_id, facts, psx_path):
     """Write every number this run produced back to the registry, then
     capture the snapshot the atlas reads when the folder is gone."""
@@ -560,6 +580,7 @@ def registry_success(transect_id, facts, psx_path):
         stage="done",
         **numbers,
     )
+    record_step1_facts(transect_id, facts)
 
     # The snapshot is a copy of facts already written above, so a failure
     # here is logged and the row still stands.

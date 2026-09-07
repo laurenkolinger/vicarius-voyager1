@@ -118,6 +118,46 @@ def registry_failure(readable_id, message):
     registry_note(readable_id, message)
 
 
+# Atlantic Standard Time, the platform's clock for every new timestamp.
+AST = datetime.timezone(datetime.timedelta(hours=-4))
+
+
+def ast_stamp(moment):
+    """ISO 8601 with the -04:00 offset for a naive local datetime, the form
+    the registry sidecars carry (for example 2026-09-04T07:05:09-04:00).
+    The naive value is read as this machine's local time and converted, so
+    the stamp is right even on a box whose clock is not set to AST."""
+    return moment.astimezone(AST).isoformat(timespec="seconds")
+
+
+def record_step0_facts(readable_id, start_time, end_time, frames_extracted):
+    """Write the step 0 facts the atlas drop-down shows for this timepoint
+    into the registry's row_facts.csv (section voyager1): when extraction
+    started and finished, how long it took, how many frames it wrote, and
+    where its console log is. No-op outside TCRMP mode. A failure to write
+    the facts is logged and never fails the extraction: the frames and the
+    registry row are already on disk and are the work that matters.
+    """
+    if not registry_client.enabled():
+        return
+    log_path = step_log_path("step0")
+    facts = {
+        "step0_started": ast_stamp(start_time),
+        "step0_finished": ast_stamp(end_time),
+        "step0_seconds": round((end_time - start_time).total_seconds(), 1),
+        "frames_extracted": int(frames_extracted),
+        "console_log_step0": log_path,
+    }
+    try:
+        registry_client.facts(
+            readable_id, registry_client.VOYAGER1_SECTION, facts,
+            links={"console_log_step0": log_path},
+            units={"step0_seconds": "s", "frames_extracted": "count"},
+        )
+    except Exception as exc:
+        logging.warning(f"Could not record the step 0 facts for {readable_id}: {exc}")
+
+
 # How often the extraction loop reports progress while ffmpeg runs, in
 # seconds. The report is one cheap directory listing per interval, so it
 # never slows the extraction itself.
@@ -269,6 +309,10 @@ def process_timepoint(readable_id, video_paths, row=None, tcrmp=True):
             "Status": "Extracting frames",
         })
         registry_client.stage(readable_id, 0, "extracting")
+        # The atlas tails whatever console_log holds; pointing it at this
+        # step's own log file makes the extraction output visible while it
+        # runs (step 1 repoints the cell at its own log when it starts).
+        registry_client.update(readable_id, console_log=step_log_path("step0"))
 
         first_path = video_paths[0]
         probe_info = videos.probe(first_path)
@@ -319,6 +363,7 @@ def process_timepoint(readable_id, video_paths, row=None, tcrmp=True):
                 "Frames directory": output_dir_final,
                 "Notes": f"FRAMES_PER_TRANSECT set to {FRAMES_PER_TRANSECT}. No frames extracted.",
             })
+            record_step0_facts(readable_id, start_time, end_time, 0)
             return readable_id, True
 
         if total_duration <= 0:
@@ -401,6 +446,7 @@ def process_timepoint(readable_id, video_paths, row=None, tcrmp=True):
             registry_fields["video_format"] = f"{container}/{codec}" if codec else container
         if registry_fields:
             registry_client.update(readable_id, **registry_fields)
+        record_step0_facts(readable_id, start_time, end_time, cumulative_frames_extracted)
 
         logging.info(
             f"Successfully extracted {cumulative_frames_extracted} frames for {readable_id} "

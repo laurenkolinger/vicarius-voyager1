@@ -1,0 +1,81 @@
+# manual_edit_checklist.yaml: the manual edit steps between Voyager 1 (step 1)
+# and Voyager 2, kept in one file with two readers.
+#
+#   - run_phase1.print_manual_instructions renders the console form: the text
+#     under `console:` around every section and step. A step's `console_text`
+#     replaces `text` in the console only, and a section without a
+#     `console_heading` prints its steps at the outer indent with no heading
+#     line. The rendered console form is byte-identical to the checklist the
+#     runner printed before this file existed.
+#   - the manual edit module (vicarius/modules/manual_edit, manualedit/checklist.py)
+#     renders the checklist popout from `sections[].steps[]`: id, heading,
+#     step, text, hint. The `hint` is the cheat sheet line shown under a step.
+#
+# Keep step ids stable: a manual edit job stores its ticks by step id.
+# Last updated: 2026-09-04 (LO)
+
+console:
+  banner: "PHASE 1 COMPLETE - MANUAL STEP REQUIRED"
+  intro:
+    - "Before running Phase 2, you must manually straighten and prepare"
+    - "each model in the Metashape GUI."
+  location: "PSX file location: {project_dir}/"
+  scope: "For each chunk in each PSX file:"
+  outro:
+    - "When done with all models, continue with the step 2 module for"
+    - "automatic scaling and export (see STEP2_HANDOFF.md at the"
+    - "module top level)."
+
+sections:
+  - id: straightening
+    heading: "Straightening and cropping (always required)"
+    console_heading: "STRAIGHTENING (always required):"
+    steps:
+      - id: load_textured
+        step: 1
+        text: "Load the textured model"
+        hint: "Double-click the chunk in the Workspace pane, then choose the textured view in the Model toolbar so the reef surface is visible."
+      - id: adjust_brightness
+        step: 2
+        text: "Auto-adjust brightness/contrast on an image to improve texture"
+        hint: "Open Tools > Set Brightness, press Estimate and then OK; Metashape applies the setting to every image and to the texture display."
+      - id: rotate_view
+        step: 3
+        text: "Switch to rotate model view"
+        hint: "Pick the Rotate Object tool in the toolbar (not the navigation rotate) so the model turns relative to the region."
+      - id: align_horizontal
+        step: 4
+        text: "Rotate the model so it aligns horizontally at the top of the view"
+        hint: "Drag until the transect runs left to right along the top edge of the view; the region takes this orientation in the next step."
+      - id: rotate_region
+        step: 5
+        text: "Use 'Model > Region > Rotate Region to View' to set alignment"
+        hint: "Model > Region > Rotate Region to View turns the region to match the current view, so orient the view first."
+      - id: resize_region
+        step: 6
+        text: "Resize the region to crop to the model area (use top XY & side views)"
+        hint: "Use the Resize Region tool and check the top XY view and one side view, so the box holds the reef surface and excludes the water column and the empty edges."
+      - id: crop
+        step: 7
+        text: "Use the rectangular crop tool to crop within the region bounds"
+        hint: "Select everything outside the region with the Rectangle Selection tool and delete it (Edit > Delete Selection); the checks stop when the face count has not changed since Voyager 1."
+  - id: scaling
+    heading: "Scaling check"
+    console_heading: "SCALING PREPARATION:"
+    steps:
+      - id: targets_visible
+        step: 1
+        text: "Ensure coded targets are visible and properly positioned"
+        hint: "The markers named target 1000 to target 1030 should sit on their coded targets; drag a misplaced flag in a photo to correct it."
+      - id: two_bars
+        step: 2
+        text: "Verify at least 2 scale bars worth of targets are clearly visible"
+        hint: "Two bars are needed (target 1000 to target 1010, and target 1020 to target 1030); when Voyager 1 reported MANUAL_NEEDED, place or repair the bars now and re-apply the scale."
+  - id: finish
+    heading: "Finish"
+    steps:
+      - id: save_quit
+        step: 3
+        text: "Save the project and quit Metashape completely"
+        console_text: "Save the project and quit Metashape"
+        hint: "File > Save, then File > Exit; the checks open the project read-only and the transfer back to the Shelf refuses while Metashape still holds the project."
