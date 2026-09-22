@@ -152,8 +152,8 @@ class RunPhase1SetupTests(unittest.TestCase):
         row = registry_client.row("MRS_T1_2023ann")
         project_dir = run_phase1.prepare_tcrmp_folder(row)
 
-        expected_name = naming3d.processing_folder_name("MRS", "T1", "20231015")
-        self.assertEqual(expected_name, "MRS_T1_2023ann_3dprocessing")
+        expected_name = naming3d.processing_folder_name("MRS", "T1")
+        self.assertEqual(expected_name, "MRS_T1_3D")
         # Sibling of the season folder, directly in the corpus root - never
         # inside the video's own folder.
         self.assertEqual(project_dir, Path(self.corpus_root_a) / expected_name)
@@ -183,14 +183,14 @@ class RunPhase1SetupTests(unittest.TestCase):
         self.assertEqual(rows[0]["readable_id"], "MRS_T1_2023ann")
         self.assertEqual(rows[0]["Model ID"], "MRS_T1_2023ann")
 
-    def test_prepare_tcrmp_folder_names_for_earliest_timepoint_even_when_later_runs_first(self):
-        # Process the LATER timepoint first. The folder must still be named
-        # for the earliest known timepoint of the site/transect (2023ann),
+    def test_prepare_tcrmp_folder_name_does_not_depend_on_which_timepoint_runs_first(self):
+        # Process the LATER timepoint first. The folder is named for the site
+        # and transect alone (MRS_T1_3D), so processing order cannot change it,
         # and it goes beside the video folder of the row actually being
         # processed (corpus_root_b, sibling of video_dir_b).
         later_row = registry_client.row("MRS_T1_2024_pbl")
         project_dir_first = run_phase1.prepare_tcrmp_folder(later_row)
-        self.assertEqual(project_dir_first.name, "MRS_T1_2023ann_3dprocessing")
+        self.assertEqual(project_dir_first.name, "MRS_T1_3D")
         self.assertEqual(project_dir_first.parent, Path(self.corpus_root_b))
 
         # Now process the earlier timepoint. It must REUSE the folder just
@@ -242,7 +242,7 @@ class RunPhase1SetupTests(unittest.TestCase):
 
     def test_prepare_tcrmp_folder_creates_venv_once_per_shared_folder(self):
         # Two rows that resolve to the SAME processing folder (folder reuse,
-        # per test_prepare_tcrmp_folder_names_for_earliest_timepoint_...
+        # per test_prepare_tcrmp_folder_name_does_not_depend_on_which_...
         # above): create_venv must run exactly once for that folder, not
         # once per row, even though prepare_tcrmp_folder is called twice.
         later_row = registry_client.row("MRS_T1_2024_pbl")

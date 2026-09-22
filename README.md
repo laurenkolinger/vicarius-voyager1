@@ -43,7 +43,7 @@ The input is a set of registry rows, not a folder. Selection happens in `select_
 
 Whatever the filter, four rules apply. `registry_client.rows_for` only ever returns rows whose `process` cell is `"true"`, so the atlas's process checkbox is the switch that keeps a lit or unlit duplicate, or a bad take, out of every run. Rows are sorted by `naming3d.sort_key` (site, transect number, year, `_pbl` before `ann`), so a psx range only ever grows forward. A row whose `video_location` is not a local directory that currently exists is skipped with a printed note, because the sync driver that makes remote videos local does not exist yet and the module refuses to invent a path. A row whose `step1_status` is already `complete` is skipped unless `--force` is passed.
 
-The video itself is read from `video_location/original_videos`. A row whose `original_videos` still carries a `;`-joined multi-part list has not been through prep; `identity_for` raises, the row is logged as an error, and it is skipped rather than extracted from a nonsense path.
+The video itself is read from `video_location/original_videos`. A row whose `original_videos` still carries a `;`-joined multi-part list has not been through prep; `identity_for` raises, the row is counted as refused and closed out as failed rather than extracted from a nonsense path. A row naming a single part-numbered file is the whole recording (Lauren, 2026-09-11): step 0 accepts it and prints a `NOTE:` line with the part number into its log.
 
 ### Non-TCRMP mode
 
@@ -63,7 +63,7 @@ These are the contract everything else depends on. They live in one place, `vica
 
   That ordering works because the underscore of `_pbl` (0x5F) sorts before the `a` of `ann` (0x61).
 - **Season token rule**: month 1 to 6 is `_pbl`, month 7 to 12 is `ann`, derived once at registry ingest and editable in the atlas. The module never recomputes it; it consumes the registry value.
-- **Processing folder** (per site and transect, stable for its life): `{SITE}_{T#}_{earliest year}{earliest token}_3dprocessing`, for example `MRS_T1_2023ann_3dprocessing`. Step 2 later creates the sibling `{same}_3doutput` beside it.
+- **Processing folder** (per site and transect, stable for its life): `{SITE}_{T#}_3d`, for example `MRS_T1_3D`. No year and no season token: every timepoint of the transect is processed into this one folder, so nothing about processing order can change its name. Step 2 later creates the sibling `{SITE}_{T#}_3doutput` beside it.
 - **psx name** (per file, by the year range of the timepoints it holds): `{SITE}_{T#}_{earliest year}_{latest year}.psx`, for example `MRS_T1_2023_2023.psx` after the first timepoint, renamed on the filesystem (the `.psx` and its `.files` directory together) to `MRS_T1_2023_2025.psx` as later timepoints append. Metashape resolves the bundle by the psx stem, so the rename is a plain move of both halves after a save.
 - **Chunk label** is the readable id. **Frames folder** is `frames/{readable id}/`. **Frame files** inherit the source video's base name: `frames/MRS_T1_2023ann/TCRMP20231015_3D_MRS_T1_00001.tiff`. Frames are never renamed.
 - **Non-TCRMP**: ids are the original file names with the extension stripped, and folders and psx files are named from them as before (`psx_{N}_{YYYYMMDD}.psx`, or `{id}_{YYYYMMDD}.psx` when `max_chunks_per_psx` is 1).
@@ -535,7 +535,7 @@ Step 1 ends by writing `manual_edit_status = awaiting` to every timepoint it com
     ======================================================================
      STEP 1 COMPLETE - MANUAL EDIT GATE
     ======================================================================
-      Folder: /path/to/MRS_T1_2023ann_3dprocessing
+      Folder: /path/to/MRS_T1_3D
         MRS_T1_2023ann
           psx:   MRS_T1_2023_2023.psx
           scale: PASS (2 bar(s), 1787 ppm)

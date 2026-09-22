@@ -46,6 +46,7 @@ from pathlib import Path
 
 import yaml
 
+import gpu_claim
 import registry_client
 import status_rows
 import videos as videos_mod
@@ -137,7 +138,7 @@ def _interactive() -> bool:
     """
     try:
         return sys.stdin.isatty()
-    except Exception:
+    except Exception:  # silent-ok: stdin.isatty() on a closed or exotic stdin; False is the answer and logging is not up yet
         return False
 
 
@@ -679,7 +680,15 @@ def read_min_free_disk_gb(project_dir: Path) -> float:
             "min_free_disk_gb", DEFAULT_MIN_FREE_DISK_GB
         )
         return float(value)
-    except Exception:
+    except Exception as exc:
+        # Say which floor is actually in force. A params file that cannot be
+        # read silently reverted to the default before, so a run configured to
+        # stop at 500 GB would happily fill the disk to the built-in figure
+        # instead. Same shape as the 2026-09-06 registry failure: a caught
+        # error became a wrong answer with nobody told.
+        logging.warning("The disk floor could not be read from %s (%s: %s), so this run uses the "
+                        "built-in default of %s GB.", params_path, type(exc).__name__, exc,
+                        DEFAULT_MIN_FREE_DISK_GB)
         return float(DEFAULT_MIN_FREE_DISK_GB)
 
 
@@ -722,7 +731,13 @@ def _reconcile_stage_after_step1(readable_id: str) -> None:
     stage is still an active word, settle the stage to "done"."""
     try:
         row = registry_client.row(readable_id) or {}
-    except Exception:
+    except Exception as exc:
+        # An unreachable registry here left the row badged interrupted forever
+        # with no word anywhere. Report it: on 2026-09-06 exactly this silence,
+        # one layer down, cost an evening.
+        logging.warning("The stage of %s could not be settled because the registry could not be "
+                        "read (%s: %s); the row may read interrupted until the next run.",
+                        readable_id, type(exc).__name__, exc)
         return
     stage = (row.get("stage") or "").strip()
     if stage not in ("", "done", "failed") and row.get("step1_status") == "complete":
@@ -1003,7 +1018,7 @@ def _link_output(vicarius_run_dir: Path, name: str, target: Path) -> None:
         link = outputs_dir / name
         if not link.exists():
             os.symlink(str(target), str(link))
-    except Exception:
+    except Exception:  # silent-ok: a convenience symlink into the outputs folder; its absence changes nothing
         pass  # Non-critical
 
 
@@ -1012,21 +1027,22 @@ def _link_output(vicarius_run_dir: Path, name: str, target: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _earliest_date_for(site: str, transect: str) -> str:
-    """Synthetic YYYYMMDD for the earliest known registry timepoint of a
-    site/transect (year + season_token -> YYYY0401 for _pbl, YYYY1001 for
-    ann), so the shared processing folder is always named for the earliest
-    timepoint even when a later one is processed first."""
-    rows = registry_client.rows_for(site=site, transect=transect) or []
-    dates = []
-    for r in rows:
-        year, token = r.get("year"), r.get("season_token")
-        if not year or token not in ("_pbl", "ann"):
-            continue
-        dates.append(f"{year}0401" if token == "_pbl" else f"{year}1001")
-    if not dates:
-        raise RuntimeError(f"No dated registry rows found for {site} {transect}")
-    return min(dates)
+def _warn_run_not_logged(outcome, exc):
+    """Say that the VICARIUS processing log could not record how this run ended.
+
+    Parameters:
+        outcome: the run's own outcome, "paused", "failed" or "success".
+        exc: whatever the log write raised.
+
+    The run is over either way, so a log write failing never changes the exit
+    code. It must not be silent either: a run missing from the processing log
+    is indistinguishable from a run that never happened, and this module's
+    whole audit trail is that log.
+    """
+    logging.warning(
+        "This run ended %s, but the VICARIUS processing log could not record it "
+        "(%s: %s). The run itself is unaffected; its row in the log is missing.",
+        outcome, type(exc).__name__, exc)
 
 
 def prepare_tcrmp_folder(row: dict, run_id=None, params_version=None, params_file=None) -> Path:
@@ -1052,8 +1068,8 @@ def prepare_tcrmp_folder(row: dict, run_id=None, params_version=None, params_fil
     processing_location, this reuses it (even if THIS row's video sits
     under a different parent); a new folder is only created, beside THIS
     row's video folder, when no row of that site/transect has one yet -
-    named for the earliest known timepoint regardless of processing
-    order. venv setup
+    named {SITE}_{T#}_3d, which carries no season and so does not depend
+    on which timepoint is processed first. venv setup
     (ensure_project_ready) is per-folder, not per-row, so a shared folder
     only pays for it once even when several timepoints are processed in the
     same run.
@@ -1073,8 +1089,7 @@ def prepare_tcrmp_folder(row: dict, run_id=None, params_version=None, params_fil
     if existing:
         project_dir = Path(existing)
     else:
-        earliest_date = _earliest_date_for(site, transect)
-        folder_name = _naming3d().processing_folder_name(site, transect, earliest_date)
+        folder_name = _naming3d().processing_folder_name(site, transect)
         # abspath, not resolve(): normalize without following symlinks, so
         # the folder is placed beside the video folder as the operator sees
         # it (consistent with step0's abspath comparisons).
@@ -1337,8 +1352,8 @@ def run_tcrmp_mode(args, metashape_path: str) -> None:
                     parent_event_id=start_event,
                     notes=str(e),
                 )
-            except Exception:
-                pass
+            except Exception as exc:  # silent-ok: best-effort processing-log write while already exiting; the real reason is reported by the raiser
+                _warn_run_not_logged("paused", exc)
         sys.exit(PAUSE_EXIT_CODE)
 
     except RuntimeError as e:
@@ -1355,8 +1370,8 @@ def run_tcrmp_mode(args, metashape_path: str) -> None:
                     parent_event_id=start_event,
                     notes=str(e),
                 )
-            except Exception:
-                pass
+            except Exception as exc:  # silent-ok: best-effort processing-log write while already exiting; the real reason is reported by the raiser
+                _warn_run_not_logged("failed", exc)
 
         sys.exit(1)
 
@@ -1378,8 +1393,8 @@ def run_tcrmp_mode(args, metashape_path: str) -> None:
                 parent_event_id=start_event,
                 notes=run_notes,
             )
-        except Exception:
-            pass
+        except Exception as exc:  # silent-ok: best-effort processing-log write while already exiting; the real reason is reported by the raiser
+            _warn_run_not_logged("failed" if disk_failed else "success", exc)
 
     hours = elapsed / 3600
     if hours >= 1:
@@ -1652,8 +1667,8 @@ def run_non_tcrmp_mode(args, metashape_path: str) -> None:
                     parent_event_id=start_event,
                     notes=str(e),
                 )
-            except Exception:
-                pass
+            except Exception as exc:  # silent-ok: best-effort processing-log write while already exiting; the real reason is reported by the raiser
+                _warn_run_not_logged("paused", exc)
         sys.exit(PAUSE_EXIT_CODE)
 
     except RuntimeError as e:
@@ -1670,8 +1685,8 @@ def run_non_tcrmp_mode(args, metashape_path: str) -> None:
                     parent_event_id=start_event,
                     notes=str(e),
                 )
-            except Exception:
-                pass
+            except Exception as exc:  # silent-ok: best-effort processing-log write while already exiting; the real reason is reported by the raiser
+                _warn_run_not_logged("failed", exc)
 
         sys.exit(1)
 
@@ -1689,8 +1704,8 @@ def run_non_tcrmp_mode(args, metashape_path: str) -> None:
                 parent_event_id=start_event,
                 notes=f"Processed {len(ids)} model(s), input_type={input_type}",
             )
-        except Exception:
-            pass
+        except Exception as exc:  # silent-ok: best-effort processing-log write while already exiting; the real reason is reported by the raiser
+            _warn_run_not_logged("success", exc)
 
     hours = elapsed / 3600
     if hours >= 1:
@@ -1803,12 +1818,64 @@ def finalize_args(parser: argparse.ArgumentParser, args) -> None:
         parser.error(str(exc))
 
 
+def _check_gpu_right_of_way() -> None:
+    """Ask VICARIUS whether VOYAGER may touch a card right now, and stop if not.
+
+    Parameters: none.
+    Returns:
+        None. Returns silently on a "granted" or "unregistered" decision:
+        port 5090 being unreachable is fail-open by design (gpu_claim.py
+        has already warned once on stderr for that case), and the run
+        proceeds unregistered, showing up as an unclaimed holder in the
+        GPU monitor once the desktop UI comes back.
+
+    Called once, right after the command line is parsed and validated and
+    before Metashape is ever touched (spec docs/superpowers/specs/2026-09-
+    17-gpu-right-of-way-design.md, "Gates"), so a launch from a terminal
+    that bypasses the desktop UI's runner still refuses to collide with
+    another model-tier run. This is advisory only and claims nothing:
+    vicarius_ui_os/runner.py's start_job() already made the binding claim,
+    with this process's own pid, before spawning it; a second claim here
+    would be a second writer of state this process does not own (design
+    semantics item 6, "one writer").
+
+    Raises:
+        SystemExit: the gate refuses the start (decision "refused" or
+            "needs_pin"), after printing the gate's own message to stderr
+            and exiting with status 1.
+    """
+    # The helper is contracted never to raise, and a bug that broke that
+    # contract must still never be the reason a multi-day reconstruction
+    # dies. The whole point of this system is protecting long runs, so it
+    # fails open on its own failure: warn on stderr, and let the science
+    # proceed. Found 2026-09-17 by the VOYAGER 2 gate test, which had no
+    # VOYAGER 1 equivalent until the same day.
+    try:
+        result = gpu_claim.check(module="3D_phase_1", by="LO")
+    except Exception as exc:  # noqa: BLE001 - see the comment above
+        print(
+            "gpu_claim: the GPU right-of-way check itself failed "
+            "(" + str(exc) + "); proceeding unregistered",
+            file=sys.stderr,
+        )
+        return
+    if result.get("decision") in ("refused", "needs_pin"):
+        print(
+            result.get("message")
+            or "GPU right of way: VOYAGER may not start right now.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+
 def main():
     """Parse and validate the command line, find Metashape, then run the
     TCRMP (registry) mode or the plain --input/--project mode."""
     parser = build_parser()
     args = parser.parse_args()
     finalize_args(parser, args)
+
+    _check_gpu_right_of_way()
 
     print("\nDetecting Metashape installation...")
     metashape_path = detect_metashape(args.yes)

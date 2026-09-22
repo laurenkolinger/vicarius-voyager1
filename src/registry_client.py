@@ -14,6 +14,7 @@ sys.path. registry.py itself reads VICARIUS_3D_REGISTRY_ROOT to decide where
 to read/write the CSVs; tests override that to a temp directory.
 """
 import importlib
+import logging
 import os
 import sys
 
@@ -51,9 +52,17 @@ def _import_library():
         _r = importlib.reload(_r)
         _registry, _naming3d = _r, _n
         _import_error = None
-    except Exception as exc:  # pragma: no cover - defensive, exercised via enabled()
+    except Exception as exc:
+        # Say it. This used to be caught into _import_error and never read: on
+        # 2026-09-06 the library would not import on the Python 3.9 environment
+        # phase 1 builds for Metashape, and the only thing the operator saw was
+        # "No videos to extract frames from" while every video sat on the disk.
+        # A caught failure that nothing reports is how twenty minutes go.
         _registry, _naming3d = None, None
         _import_error = exc
+        logging.error("The TCRMP 3D registry library at %s could not be imported, so this run "
+                      "cannot see any registry rows: %s: %s",
+                      lib_dir, type(exc).__name__, exc)
 
 
 def _tcrmp_flag():
@@ -73,6 +82,28 @@ def configure(params):
 
 def enabled():
     return _tcrmp_flag() and _registry is not None
+
+
+def unavailable_reason():
+    """Why the registry cannot be read, in one sentence, or None when it can.
+
+    Returns None when registry mode is off (which is a choice, not a failure)
+    and when the library imported cleanly. Otherwise a sentence naming the
+    library directory and the underlying error, for a caller to put in front
+    of an operator instead of guessing at a cause.
+
+    Example:
+        >>> unavailable_reason()
+        "The TCRMP 3D registry library at /x/3d could not be imported: TypeError: ..."
+    """
+    if not _tcrmp_flag():
+        return None
+    if _registry is not None:
+        return None
+    if _import_error is None:
+        return f"The TCRMP 3D registry library at {_library_dir()} was never loaded."
+    return (f"The TCRMP 3D registry library at {_library_dir()} could not be imported: "
+            f"{type(_import_error).__name__}: {_import_error}")
 
 
 def stage(readable_id, step, stage):

@@ -13,8 +13,8 @@ site/transect's shared processing folder can hold several timepoints, up to
 max_chunks_per_psx) - queried fresh from the registry each run, so a second
 run_phase1.py pass over the same folder picks up any newly-added sibling
 timepoint. Each row's video path is `video_location/original_videos`; a row
-whose original_videos still carries a ";"-joined multi-part list (prep
-failed to merge it) is logged as an error and skipped, not extracted.
+still holding a ";"-joined multi-part list is refused (_tcrmp_work_items); a
+lone part-numbered file is the whole recording (Lauren, 2026-09-11), noted.
 
 Non-TCRMP mode: videos come from processing.video_input_dir (read in place;
 run_phase1.py never copies or symlinks video input into the project). The id
@@ -48,7 +48,7 @@ from config import (
 import manifest
 import registry_client
 import videos
-from step0_naming import effective_frame_count, frame_output_pattern, identity_for
+from step0_naming import effective_frame_count, frame_output_pattern, identity_for, lone_part_note, names_a_single_part
 
 # Configure logging
 logging.basicConfig(
@@ -178,7 +178,7 @@ def _extraction_progress(video_path, output_dir, existing_files):
                 if f.endswith(".tiff") and f not in existing_files
             )
             logging.info(f"extracting {video_name}: {written} frames written")
-        except Exception:
+        except Exception:  # silent-ok: counting frames written so far, only for a progress line
             pass
 
     return report
@@ -213,7 +213,7 @@ def _run_ffmpeg(video_path, out_pattern, rate, start_number, hwaccel_args,
         except subprocess.TimeoutExpired:
             try:
                 progress_cb()
-            except Exception:
+            except Exception:  # silent-ok: firing the progress callback between ffmpeg polls
                 pass
 
 
@@ -474,15 +474,33 @@ def process_timepoint(readable_id, video_paths, row=None, tcrmp=True):
 
 
 def _tcrmp_work_items():
-    """(readable_id, [video_path], row) for every registry row whose
-    processing_location is this project folder. Queried fresh from the
-    registry every run, so a later sibling timepoint (same site/transect,
-    added after this folder was first created) is picked up on a rerun.
+    """The registry rows this processing folder is responsible for, split into
+    the ones that can be worked and the ones that cannot.
+
+    Returns:
+        (items, refused). `items` is [(readable_id, [video_path], row)] for
+        every row whose identity resolves, including a row that names a single
+        part-numbered file: a lone part is the whole recording (Lauren,
+        2026-09-11), so the row is worked, and the part number goes to this
+        step's log as a WARNING and to the console as a NOTE line so the fact
+        is never lost. `refused` is [(readable_id, reason)] for every row whose
+        identity does not resolve: a row still holding several video parts
+        joined by ";" that were never merged.
+
+    Rows are queried fresh from the registry every run, so a later sibling
+    timepoint (same site and transect, added after this folder was first
+    created) is picked up on a rerun.
+
+    A refused row is returned, not dropped. Until 2026-09-08 it was skipped
+    with `continue`, which took it out of the run's own denominator: a run
+    given four timepoints, one of them unmerged, extracted three, reported
+    "3/3", exited zero, and the Carousel moved on. Everything downstream had
+    to believe it, because nothing anywhere counted the fourth.
     """
     rows = registry_client.rows_for() or []
     project_dir = os.path.abspath(DIRECTORIES["base"])
 
-    items = []
+    items, refused = [], []
     for row in rows:
         location = os.path.abspath(row.get("processing_location") or "")
         if location != project_dir:
@@ -492,10 +510,15 @@ def _tcrmp_work_items():
         except ValueError as e:
             logging.error(str(e))
             print(f"ERROR: {e}")
+            refused.append((row.get("readable_id") or "", str(e)))
             continue
+        if names_a_single_part(original_videos):
+            note = lone_part_note(original_videos, readable_id)
+            logging.warning(note)
+            print(f"NOTE: {note}")
         video_path = os.path.join(row.get("video_location") or "", original_videos)
         items.append((readable_id, [video_path], row))
-    return items
+    return items, refused
 
 
 def _non_tcrmp_work_items():
@@ -529,28 +552,54 @@ def main():
     tcrmp = bool(PARAMS.get("processing", {}).get("tcrmp", False))
     registry_client.configure(PARAMS)
 
-    work_items = _tcrmp_work_items() if tcrmp else _non_tcrmp_work_items()
+    if tcrmp:
+        work_items, refused = _tcrmp_work_items()
+    else:
+        work_items, refused = _non_tcrmp_work_items(), []
 
-    if not work_items:
-        logging.error("No videos to extract frames from.")
-        print("ERROR: no videos to extract frames from; nothing was done.")
+    if not work_items and not refused:
+        # Never blame the videos without first checking whether the registry
+        # could be read at all. On 2026-09-06 the registry library would not
+        # import on this module's Python 3.9 environment, every row went
+        # invisible, and the run reported missing videos while all of them sat
+        # on the disk. The reason comes first because it is the actual fault.
+        reason = registry_client.unavailable_reason() if tcrmp else None
+        if reason:
+            logging.error("%s No timepoint could be read, so there is nothing to extract. "
+                          "The videos themselves were not checked.", reason)
+            print(f"ERROR: {reason}")
+            print("ERROR: no registry rows could be read, so no timepoint was processed. "
+                  "This is not a missing video.")
+            sys.exit(1)
+        where = ("this processing folder's registry rows" if tcrmp
+                 else PARAMS.get("processing", {}).get("video_input_dir") or "the video input folder")
+        logging.error("No videos to extract frames from (looked in %s).", where)
+        print(f"ERROR: no videos to extract frames from in {where}; nothing was done.")
         sys.exit(1)
 
-    logging.info(f"Found {len(work_items)} timepoint(s) to potentially process.")
+    total = len(work_items) + len(refused)
+    logging.info(f"Found {total} timepoint(s) to potentially process.")
 
     results = []
-    for idx, (readable_id, video_paths, row) in enumerate(work_items, start=1):
+    # Refused rows are counted and closed out first, so the registry stops
+    # showing them as live and the run's own total matches what it was given.
+    for readable_id, reason in refused:
+        if readable_id:
+            registry_failure(readable_id, f"step 0 could not start: {reason}")
+        results.append((readable_id or "(row with no readable id)", False))
+
+    for idx, (readable_id, video_paths, row) in enumerate(work_items, start=len(refused) + 1):
         # Pause boundary: the previous timepoint's frames are fully extracted
         # and its tracking row updated. Stop here before starting the next.
         checkpoint_pause(f"before timepoint {readable_id}")
 
-        logging.info(f"Processing timepoint {idx}/{len(work_items)}: {readable_id} "
+        logging.info(f"Processing timepoint {idx}/{total}: {readable_id} "
                      f"with {len(video_paths)} part(s)")
         processed_id, success = process_timepoint(readable_id, video_paths, row=row, tcrmp=tcrmp)
         results.append((processed_id, success))
 
     successful = sum(1 for _, success in results if success)
-    logging.info(f"Frame extraction run complete. Successfully processed {successful}/{len(work_items)} timepoint(s).")
+    logging.info(f"Frame extraction run complete. Successfully processed {successful}/{total} timepoint(s).")
 
     # Exit code is the only signal run_phase1 (and the VICARIUS runner behind
     # it) reads. Extracting nothing that was queued is a failed run; a partial
@@ -561,11 +610,11 @@ def main():
         logging.error(
             f"Frame extraction failed for every timepoint: {', '.join(failed)}"
         )
-        print(f"ERROR: frame extraction failed for all {len(work_items)} timepoint(s).")
+        print(f"ERROR: frame extraction failed for all {total} timepoint(s).")
         sys.exit(1)
     if failed:
         logging.warning(f"Failed to process the following timepoint(s): {', '.join(failed)}")
-        print(f"WARNING: {len(failed)} of {len(work_items)} timepoint(s) failed: {', '.join(failed)}")
+        print(f"WARNING: {len(failed)} of {total} timepoint(s) failed: {', '.join(failed)}")
 
 
 if __name__ == "__main__":

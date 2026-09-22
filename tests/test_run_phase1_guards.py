@@ -409,7 +409,7 @@ class ProcessingLockWindowTests(_TcrmpLoopHarness):
     def test_held_lock_from_another_process_skips_the_row(self):
         # Pre-create the folder and hold its lock the way another driver
         # would; the loop must skip the row without touching the steps.
-        project_dir = Path(self.corpus_root) / "MRS_T1_2023ann_3dprocessing"
+        project_dir = Path(self.corpus_root) / "MRS_T1_3D"
         project_dir.mkdir()
         holder = open(project_dir / ".processing.lock", "w")
         self.addCleanup(holder.close)
@@ -453,11 +453,11 @@ class ProtectOperatorForwardingTests(unittest.TestCase):
             season_token="ann", notes="operator wrote this")
         registry_client.update(
             self.READABLE_ID, protect_operator=True,
-            notes="machine note", processing_folder="MRS_T1_2023ann_3dprocessing")
+            notes="machine note", processing_folder="MRS_T1_3D")
         row = registry_client.row(self.READABLE_ID)
         # The operator's cell survives; the non-operator cell still updates.
         self.assertEqual(row["notes"], "operator wrote this")
-        self.assertEqual(row["processing_folder"], "MRS_T1_2023ann_3dprocessing")
+        self.assertEqual(row["processing_folder"], "MRS_T1_3D")
 
     def test_protect_operator_defaults_off(self):
         registry_client.update(self.READABLE_ID, site="MRS", transect="T1",
@@ -716,17 +716,17 @@ class RunFactsInLoopTests(_TcrmpLoopHarness):
         self.assertIn("# seeded-by-test", text)
 
     def test_seed_helper_names_its_source(self):
-        project_dir = Path(self.corpus_root) / "fresh_3dprocessing"
+        project_dir = Path(self.corpus_root) / "fresh_3d"
         project_dir.mkdir()
         seed = _write_params_file(Path(self.corpus_root) / "custom.yaml")
         self.assertEqual(run_phase1.seed_analysis_params(project_dir, seed), seed)
         self.assertIsNone(run_phase1.seed_analysis_params(project_dir, seed))
-        other = Path(self.corpus_root) / "other_3dprocessing"
+        other = Path(self.corpus_root) / "other_3d"
         other.mkdir()
         self.assertEqual(run_phase1.seed_analysis_params(other), run_phase1.TEMPLATE_PARAMS)
 
     def test_seed_helper_refuses_a_vanished_params_file(self):
-        project_dir = Path(self.corpus_root) / "fresh_3dprocessing"
+        project_dir = Path(self.corpus_root) / "fresh_3d"
         project_dir.mkdir()
         with self.assertRaises(RuntimeError) as ctx:
             run_phase1.seed_analysis_params(project_dir, Path(self.corpus_root) / "gone.yaml")
@@ -1031,7 +1031,7 @@ class Step1FactWriteTests(_StepFactHarness):
 # print_manual_instructions reads the shared checklist; output unchanged
 # ---------------------------------------------------------------------------
 
-MANUAL_PROJECT_DIR = Path("/data/MRS_T1_2023ann_3dprocessing")
+MANUAL_PROJECT_DIR = Path("/data/MRS_T1_3D")
 PREVIOUS_MANUAL_TEXT = "\n".join([
     "",
     "=" * 60,

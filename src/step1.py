@@ -447,7 +447,7 @@ def _progress_logger(label, min_interval_s=30):
             # above (a pct like 99.6 would otherwise round up and print 100%
             # twice).
             logging.info(f"{label}: {min(round(pct), 99)}%")
-        except Exception:
+        except Exception:  # silent-ok: progress logging inside a Metashape callback must never interrupt the processing it reports on
             pass
 
     return callback
@@ -654,7 +654,7 @@ def acquire_project_lock(step_name):
         try:
             with open(lock_path, "r") as f:
                 holder = f.read().strip() or "(unknown holder)"
-        except Exception:
+        except Exception:  # silent-ok: reading the lock holder's name for the message raised just below, which says (unknown holder)
             holder = "(unknown holder)"
         raise RuntimeError(
             f"Another VICARIUS 3D step is already running for this project.\n"
@@ -1177,7 +1177,13 @@ def process_transect(transect_id, chunk, doc, psx_path):
         registry_client.stage(transect_id, 1, "texturing")
         try:
             area_m2 = float(chunk.model.area())
-        except Exception:
+        except Exception as exc:
+            # A zero area is not a neutral default: the texture page count is
+            # computed from it, so silence here quietly changes what the run
+            # produces. Say so and carry on with the fallback.
+            logging.warning("The mesh area of %s could not be read (%s: %s), so the texture page "
+                            "count falls back to the fixed figure instead of being computed.",
+                            transect_id, type(exc).__name__, exc)
             area_m2 = 0.0
         page_count = scale_utils.compute_texture_pages(
             area_m2,

@@ -73,7 +73,7 @@ class RegistryClientTests(unittest.TestCase):
     def test_snapshot_delegates_to_registry(self):
         self.rc.configure({"processing": {"tcrmp": True}})
         self.rc.update("MRS_T1_2023ann", site="MRS", transect="T1", year="2023", season_token="ann")
-        folder = os.path.join(self.tmp, "MRS_T1_2023ann_3dprocessing")
+        folder = os.path.join(self.tmp, "MRS_T1_3D")
         os.makedirs(folder)
         d = self.rc.snapshot("MRS_T1_2023ann", folder, {"scale_error_mm": 1.4}, report_pdf=None, params_yaml=None)
         self.assertTrue(os.path.isdir(d))

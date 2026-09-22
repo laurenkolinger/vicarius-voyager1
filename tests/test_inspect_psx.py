@@ -388,7 +388,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(doc["chunks"][0]["scale_error_ppm"], 4000)
 
     def test_params_beside_the_psx_are_picked_up(self):
-        folder = self.tmp / "MRS_T1_2023ann_3dprocessing"
+        folder = self.tmp / "MRS_T1_3D"
         folder.mkdir()
         (folder / "analysis_params.yaml").write_text("processing:\n  model_processing:\n    scale_error_threshold: 0.02\n")
         psx = folder / "MRS_T1_2023_2023.psx"
